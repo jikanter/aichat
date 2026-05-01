@@ -17,6 +17,7 @@ AIchat is a command-line swiss army knife for ai applications.
 - This tool should use the 'showboat' command to demo its work. Use the output of `showboat --help` to understand how to implement.
 - When running `showboat note`, output in a deterministic manner. This is important for `showboat validate` to work.
 - Implement both repl and batch interaction surfaces for functionality
+- Read through the file in the https://github.com/simonw/showboat/blob/main/docs/plans/ and add any skills to the project.
 
 ### Ask First (Requires approval)
 - No desktop UI, all Ux work should happen
@@ -26,3 +27,7 @@ AIchat is a command-line swiss army knife for ai applications.
 - Significant increase in number of dependencies
 
 </brief:generated>
+
+## Integrated requirements
+
+Requirements that span more than one project (aichat ↔ llm-functions ↔ the future harness interface) live in `docs/roadmap/integrated-architecture/`. Anything purely internal to aichat stays in `docs/roadmap/` or `docs/architecture/`. See `docs/roadmap/integrated-architecture/README.md` for what qualifies.
