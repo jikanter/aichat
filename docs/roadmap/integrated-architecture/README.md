@@ -9,7 +9,6 @@ This directory holds requirements, plans, and design notes that span more than o
 ## Dependency management
 
 
-
 A document belongs here when its requirements only make sense across two or more of those systems — e.g., a change in aichat's MCP routing that depends on a tool-naming convention shared with llm-functions, or a harness-side feature that needs both aichat and llm-functions to agree on a registration scheme.
 
 Documents that live entirely inside one project belong in that project's own roadmap or design directory.
