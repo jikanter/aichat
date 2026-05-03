@@ -5,7 +5,7 @@
 
 aichat exposes its functions and MCP-pool tools to external clients via `aichat --mcp` (stdio MCP server). External MCP servers configured under `mcp_servers:` in `config.yaml` are loaded into the same pool and re-advertised under namespaced names like `<server>:<tool>`.
 
-This demo walks the protocol end-to-end and pins two regressions captured during the 2026-05-01 bridge-retirement validation pass.
+This demo walks the protocol end-to-end. Sections 4 and 5 pin two regressions captured during the 2026-05-01 bridge-retirement validation pass; both were resolved in Phase 31 (`is_mcp_call` routing in `ToolCall::eval`, and concurrent + isolated pool init in `all_tool_declarations`). Section 6 demonstrates the Phase 31C portable `mcp.json` loader.
 
 ## 0. Setup
 
@@ -146,23 +146,23 @@ printf '%s\n%s\n%s\n%s\n' '{"jsonrpc":"2.0","id":1,"method":"initialize","params
 - git:git_diff_staged: Shows changes that are staged for commit
 ```
 
-## 4. Known limitation: tool-call dispatch (probe a)
+## 4. Tool-call dispatch through the MCP pool (probe a, fixed in Phase 31A)
 
-aichat exposes `mcp_servers:` tools but, as of 0.5.1-eridian, cannot dispatch them through `--mcp` mode. Single-call `ToolCall::eval` (`function.rs:337`) lacks the MCP-pool routing branch that the batch path `eval_tool_calls` has (`function.rs:33-44`), so calls fall through to the llm-functions binary lookup and fail.
+`aichat --mcp` dispatches single-call invocations through the same MCP-pool routing that `eval_tool_calls` uses. The shared predicate is `is_mcp_call` in `src/function.rs`. A namespaced call like `git:git_status` resolves through `mcp_pool.call_tool` instead of the llm-functions binary path.
 
 ```bash
-printf '%s\n%s\n%s\n%s\n%s\n' '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2024-11-05","capabilities":{},"clientInfo":{"name":"demo","version":"0"}}}' '{"jsonrpc":"2.0","method":"notifications/initialized","params":{}}' '{"jsonrpc":"2.0","id":2,"method":"tools/list","params":{}}' '{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"discover_roles","arguments":{"query":"git_"}}}' '{"jsonrpc":"2.0","id":4,"method":"tools/call","params":{"name":"git:git_status","arguments":{"repo_path":"/tmp"}}}' | /tmp/aichat_mcp_probe.sh /tmp/aichat_mcp_git.yaml | jq -r 'select(.id==4) | .error.message // "(unexpected success)"' | grep -oE 'binary not found' | head -1
+printf '%s\n%s\n%s\n%s\n%s\n' '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2024-11-05","capabilities":{},"clientInfo":{"name":"demo","version":"0"}}}' '{"jsonrpc":"2.0","method":"notifications/initialized","params":{}}' '{"jsonrpc":"2.0","id":2,"method":"tools/list","params":{}}' '{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"discover_roles","arguments":{"query":"git_"}}}' '{"jsonrpc":"2.0","id":4,"method":"tools/call","params":{"name":"git:git_status","arguments":{"repo_path":"/tmp"}}}' | /tmp/aichat_mcp_probe.sh /tmp/aichat_mcp_git.yaml | jq -r 'select(.id==4) | .result.content[0].text // .error.message // "(no response)"' | grep -oE 'branch|nothing to commit|untracked' | head -1
 ```
 
 ```output
-binary not found
+branch
 ```
 
-The "binary not found" hint confirms the call took the llm-functions binary path instead of the MCP pool. The fix is to port the `is_mcp` check from `eval_tool_calls` into `ToolCall::eval`.
+The fix landed when `ToolCall::eval` grew the same MCP-pool dispatch as `eval_tool_calls`; both paths now share `is_mcp_call`.
 
-## 5. Multi-server pool happy path (probe b small-N)
+## 5. Multi-server pool: per-server isolation (probe b, fixed in Phase 31B)
 
-Two concurrent stdio servers (`sqlite` + `git`) boot cleanly and register all of their tools. The large-N regression (10 servers from the production `mcp.json`) is pinned by a `skip`-marked test in `tests/integration/mcp-server.sh` until the pool/runtime issue is identified.
+Concurrent stdio servers boot via `join_all` and register independently. A single hung or misconfigured server no longer aborts pool init for the rest. Two-server happy path:
 
 ```bash
 printf '%s\n%s\n%s\n%s\n' '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2024-11-05","capabilities":{},"clientInfo":{"name":"demo","version":"0"}}}' '{"jsonrpc":"2.0","method":"notifications/initialized","params":{}}' '{"jsonrpc":"2.0","id":2,"method":"tools/list","params":{}}' '{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"discover_roles","arguments":{}}}' | /tmp/aichat_mcp_probe.sh /tmp/aichat_mcp_small_n.yaml | jq -r 'select(.id==3) | .result.content[0].text' | grep -oE '^- (sqlite|git):[a-z_]+' | awk -F: '{print $2}' | sort -u | head -1
@@ -178,6 +178,43 @@ printf '%s\n%s\n%s\n%s\n' '{"jsonrpc":"2.0","id":1,"method":"initialize","params
 
 ```output
 18
+```
+
+## 6. Portable mcp.json declarations (Phase 31C)
+
+`mcp_servers_file:` in `config.yaml` points at a Claude-Code-compatible `mcp.json` (`{"mcpServers": {...}}`). Aichat normalizes each entry into the same `McpServerConfig` it uses for inline `mcp_servers:` declarations and merges them — inline wins on key conflict. Search order when the field is unset: `./mcp.json`, `$XDG_CONFIG_HOME/mcp/mcp.json`, `~/.config/mcp/mcp.json`. See [`SPEC-mcp-json-artifact.md`](../architecture/integrated-architecture/SPEC-mcp-json-artifact.md).
+
+```bash
+cat >/tmp/aichat_mcp_portable.json <<JSON
+{
+  "mcpServers": {
+    "git": {
+      "command": "/Users/admin/.local/bin/uvx",
+      "args": ["mcp-server-git"]
+    }
+  }
+}
+JSON
+cat >/tmp/aichat_mcp_portable.yaml <<YAML
+model: ollama:gemma4:26b
+function_calling: true
+clients:
+- type: openai-compatible
+  name: ollama
+  api_base: http://localhost:11434/v1
+  models:
+    - name: gemma4:26b
+      max_input_tokens: 160000
+      max_output_tokens: 8942
+      supports_function_calling: true
+
+mcp_servers_file: /tmp/aichat_mcp_portable.json
+YAML
+printf '%s\n%s\n%s\n%s\n' '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2024-11-05","capabilities":{},"clientInfo":{"name":"demo","version":"0"}}}' '{"jsonrpc":"2.0","method":"notifications/initialized","params":{}}' '{"jsonrpc":"2.0","id":2,"method":"tools/list","params":{}}' '{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"discover_roles","arguments":{"query":"git"}}}' | /tmp/aichat_mcp_probe.sh /tmp/aichat_mcp_portable.yaml | jq -r 'select(.id==3) | .result.content[0].text' | grep -oE '^- git:[a-z_]+' | head -1
+```
+
+```output
+- git:git_status
 ```
 
 ## Verification

@@ -153,6 +153,12 @@ pub struct Cli {
     /// Bypass MCP schema cache (force re-fetch from server)
     #[clap(long)]
     pub refresh: bool,
+    /// Validate a portable `mcp.json` declarations file. With no PATH, searches
+    /// `./mcp.json`, `$XDG_CONFIG_HOME/mcp/mcp.json`, then `~/.config/mcp/mcp.json`.
+    /// Exits 0 when valid, non-zero with a diagnostic when not. Combine with
+    /// `-o json` for machine-readable output.
+    #[clap(long = "validate-mcp-config", value_name = "PATH")]
+    pub validate_mcp_config: Option<Option<String>>,
     /// Run a multi-stage pipeline
     #[clap(long)]
     pub pipe: bool,

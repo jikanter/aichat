@@ -1,3 +1,5 @@
+AICHAT_BIN="${AICHAT_BIN:-./target/debug/aichat}"
+
 # Helper to run aichat with optional model override instead of --dry-run
 # Usage: run_aichat [args...]
 run_aichat() {
@@ -20,6 +22,6 @@ run_aichat() {
   done
   
   # Execute the command and capture output (BATS "run" will be used by the caller if they use 'run run_aichat')
-  # Actually, it's better if this function calls 'run ./target/debug/aichat ...'
-  run ./target/debug/aichat "${args[@]}"
+  # Actually, it's better if this function calls 'run "$AICHAT_BIN" ...'
+  run "$AICHAT_BIN" "${args[@]}"
 }

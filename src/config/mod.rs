@@ -192,6 +192,17 @@ pub struct Config {
     #[serde(default)]
     pub mcp_servers: IndexMap<String, McpServerConfig>,
 
+    /// Phase 31C: optional path to a portable `mcp.json` declarations file.
+    /// When set, aichat loads `mcpServers` from this file and merges with
+    /// `mcp_servers:` above (inline entries win on key conflict). Search
+    /// order when this field is unset:
+    ///   1. `./mcp.json` in CWD
+    ///   2. `$XDG_CONFIG_HOME/mcp/mcp.json`
+    ///   3. `~/.config/mcp/mcp.json`
+    /// See `docs/architecture/integrated-architecture/SPEC-mcp-json-artifact.md`.
+    #[serde(default)]
+    pub mcp_servers_file: Option<String>,
+
     /// MCP schema cache TTL in seconds (default: 3600)
     #[serde(default = "default_mcp_cache_ttl")]
     pub mcp_cache_ttl: u64,
@@ -350,6 +361,7 @@ impl Default for Config {
 
             clients: vec![],
             mcp_servers: Default::default(),
+            mcp_servers_file: None,
             mcp_cache_ttl: default_mcp_cache_ttl(),
             mcp_startup_timeout: default_mcp_startup_timeout(),
             mcp_call_timeout: default_mcp_call_timeout(),
@@ -429,6 +441,31 @@ impl Config {
         let ret = setup(&mut config);
         if !info_flag {
             ret?;
+        }
+
+        // Phase 31C: load any portable `mcp.json` declarations and merge with
+        // the inline `mcp_servers:` block. Inline wins on key conflict.
+        if !info_flag {
+            match crate::mcp_client::resolve_mcp_servers_file(
+                config.mcp_servers_file.as_deref(),
+            ) {
+                Ok(Some(path)) => {
+                    match crate::mcp_client::load_mcp_servers_file(&path) {
+                        Ok(file_servers) => {
+                            crate::mcp_client::merge_mcp_servers(
+                                &mut config.mcp_servers,
+                                file_servers,
+                            );
+                        }
+                        Err(e) => warn!(
+                            "ignoring mcp servers file {}: {e}",
+                            path.display()
+                        ),
+                    }
+                }
+                Ok(None) => {}
+                Err(e) => warn!("{e}"),
+            }
         }
 
         // Initialize MCP connection pool and load tool declarations from configured servers

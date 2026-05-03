@@ -43,6 +43,18 @@ use std::{env, process, sync::Arc};
 async fn main() -> Result<()> {
     load_env_file()?;
     let cli = Cli::parse();
+
+    // Phase 31E: validate a portable mcp.json declarations file. Runs before
+    // any aichat config load so a broken config.yaml doesn't mask validation
+    // results. Exits with the right code from inside the helper.
+    if let Some(ref path_arg) = cli.validate_mcp_config {
+        let exit = mcp_client::run_validate_mcp_config(
+            path_arg.as_deref(),
+            cli.output_format,
+        );
+        process::exit(exit);
+    }
+
     // MCP mode uses stdin as transport — don't consume it here
     let text = if cli.mcp { None } else { cli.text()? };
     let working_mode = if cli.mcp {
