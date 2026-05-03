@@ -1,7 +1,6 @@
 # AIChat Roadmap
 
 **Last updated:** 2026-04-07
-**Last updated:** 2026-04-07
 **317 tests passing (144 unit + 173 compatibility), 0 failures**
 
 ---
@@ -22,19 +21,20 @@ Roles are the fundamental unit of composition. This roadmap evolves roles from s
 
 ## Epic Overview
 
-| Epic | Scope | Phases | Status | Origin |
+| Epic | Scope | Phases | Status | Design |
 |---|---|---|---|---|
 | 1 | Core Platform | 0-8 | **Done** | -- |
-| 2 | Runtime Intelligence | 9-11 | Planned | [epic-2.md](./analysis/epic-2.md) |
-| 3 | Composition UX | 12-13 | **New** | Theme 6: UX Designer |
-| 4 | Typed Ports & Capabilities | 14-15 | **New** | Theme 1: All four experts |
-| 5 | Server Pipeline Engine | 16-18 | Planned | [epic-3.md](./analysis/epic-3.md) |
-| 6 | Universal Addressing | 19-20 | **New** | Theme 5: AI Architect + ML Engineer |
-| 7 | DAG Execution | 21-22 | **New** | Theme 4: AI Architect |
-| 8 | Feedback Loop | 23-24 | **New** | Theme 2: ML Engineer + ML App Engineer |
-| 9 | RAG Evolution | 25-27 | Planned | [epic-4.md](./analysis/epic-4.md) |
-| 10 | Entity Evolution | 28-29 | Planned | [epic-5.md](./analysis/epic-5.md) |
+| 2 | Runtime Intelligence | 9-11 | **Done** | [epic-2.md](./analysis/epic-2.md) |
+| 3 | Composition UX | 12-13 | Planned | [epic-3.md](./analysis/epic-3.md) |
+| 4 | Typed Ports & Capabilities | 14-15 | Planned | [epic-4.md](./analysis/epic-4.md) |
+| 5 | Server Pipeline Engine | 16-18 | **Deferred 2026-04-17** | [epic-5.md](./analysis/epic-5.md) |
+| 6 | Universal Addressing | 19-20 | Planned | [epic-6.md](./analysis/epic-6.md) |
+| 7 | DAG Execution | 21-22 | Planned | [epic-7.md](./analysis/epic-7.md) |
+| 8 | Feedback Loop | 23-24 | Planned | [epic-8.md](./analysis/epic-8.md) |
+| 9 | Knowledge Evolution | 25-27 | **Done** | [epic-9.md](./analysis/epic-9.md) |
+| 10 | Entity Evolution | 28-29 | Planned | [epic-10.md](./analysis/epic-10.md) |
 | 11 | Bridge Retirement & MCP Pool Hardening | 31 | **New** | [bridge-retirement.md](./architecture/integrated-architecture/bridge-retirement.md) |
+| 12 | Developer Experience & Performance | 30 | **Done** | -- |
 
 Architecture reference: [architecture.md](architecture/architecture.md)
 Completed Epics: [completed-epics.md](archive/roadmap/completed-epics.md)
@@ -91,9 +91,9 @@ Completed Epics: [completed-epics.md](archive/roadmap/completed-epics.md)
 
 ---
 
-## Epic 5: Server Pipeline Engine -- [design](./analysis/epic-3.md)
+## Epic 5: Server Pipeline Engine -- [design](./analysis/epic-5.md)
 
-*Renumbered from original Epic 3. Exposes AIChat's unique runtime capabilities over HTTP, turning the server from a proxy into a pipeline execution engine.*
+*Renumbered 2026-04-07 from original Epic 3. Exposes AIChat's unique runtime capabilities over HTTP, turning the server from a proxy into a pipeline execution engine.*
 
 > **[DEFERRED 2026-04-17]** Phases 16, 17, and 18 are parked while Epic 9
 > (Knowledge Evolution) is in flight. The existing `--serve` behavior is
@@ -117,7 +117,7 @@ Completed Epics: [completed-epics.md](archive/roadmap/completed-epics.md)
 
 > A pipeline stage that says `role: "review"` should resolve identically whether `review` is a local YAML file, an agent directory, a role exposed by a remote aichat server, or an MCP tool.
 
-*Source: Theme 5 — AI Architect. The "remote aichat" discovery is the seed of this epic. Absorbs Epic 5's unified entity resolution (F4) and agent-in-pipeline (F6).*
+*Source: Theme 5 — AI Architect. The "remote aichat" discovery is the seed of this epic. Absorbs Epic 10's F4 (unified entity resolution), F6 (agent-in-pipeline), and F7 (agent MCP binding).*
 
 ### Phase 19: RoleResolver & Unified Entity Resolution
 
@@ -161,27 +161,27 @@ Completed Epics: [completed-epics.md](archive/roadmap/completed-epics.md)
 
 ---
 
-## Epic 9: RAG Evolution -- [design](./analysis/epic-4.md)
+## Epic 9: Knowledge Evolution -- [design](./analysis/epic-9.md)
 
-*Renumbered from original Epic 4.*
+*Renumbered 2026-04-07 from original Epic 4. Reshaped 2026-04-16 from vector-RAG improvements to atomic-fact knowledge compilation.*
 
-### Phase 25: Structured Retrieval
+### Phase 25: Knowledge Compilation
 
 [Phase 25 Overview](./roadmap/phase-25-overview.md)
 
-### Phase 26: RAG Composability
+### Phase 26: Knowledge Query
 
 [Phase 26 Overview](./roadmap/phase-26-overview.md)
 
-### Phase 27: Graph Expansion & Observability
+### Phase 27: Knowledge Evolution
 
 [Phase 27 Overview](./roadmap/phase-27-overview.md)
 
 ---
 
-## Epic 10: Entity Evolution -- [design](./analysis/epic-5.md)
+## Epic 10: Entity Evolution -- [design](./analysis/epic-10.md)
 
-*Renumbered from original Epic 5. Some items absorbed by Epic 6 (Universal Addressing).*
+*Renumbered 2026-04-07 from original Epic 5. F4/F6/F7 absorbed by Epic 6 (Universal Addressing).*
 
 ### Phase 28: Agent Composability
 
@@ -203,18 +203,26 @@ Completed Epics: [completed-epics.md](archive/roadmap/completed-epics.md)
 
 ---
 
+## Epic 12: Developer Experience & Performance
+
+### Phase 30: Macro Compilation
+
+[Phase 30 Detail](./roadmap/phase-30-macro-compilation.md)
+
+---
+
 ## Cross-Epic Dependency Graph
 
 ```
 Epic 1 (Core Platform)         ──── DONE ──────────────────────────────────────────
   │
-  ├── Epic 2 (Runtime Intelligence) ─── Phases 9-11 ─── Infrastructure for everything
+  ├── Epic 2 (Runtime Intelligence) ─── Phases 9-11 ──── DONE
   │     │
-  │     ├── Epic 3 (Composition UX) ─── Phases 12-13 ─── Low cost, can start early
+  │     ├── Epic 3 (Composition UX) ─── Phases 12-13
   │     │     │
-  │     │     └── Epic 4 (Typed Ports) ─── Phases 14-15 ─── Foundational abstraction
+  │     │     └── Epic 4 (Typed Ports) ─── Phases 14-15
   │     │           │
-  │     │           ├── Epic 5 (Server Engine) ─── Phases 16-18 ─── Enables remote
+  │     │           ├── Epic 5 (Server Engine) ─── Phases 16-18 ─── DEFERRED
   │     │           │     │
   │     │           │     └── Epic 6 (Universal Addressing) ─── Phases 19-20
   │     │           │           │
@@ -222,14 +230,16 @@ Epic 1 (Core Platform)         ──── DONE ──────────�
   │     │           │
   │     │           └── Epic 8 (Feedback Loop) ─── Phases 23-24 ─── Independent track
   │     │
-  │     └── Epic 9 (RAG Evolution) ─── Phases 25-27 ─── Parallel track
+  │     └── Epic 9 (Knowledge Evolution) ─── Phases 25-27 ──── DONE
   │
-  └── Epic 10 (Entity Evolution) ─── Phases 28-29 ─── After addressing is unified
+  ├── Epic 10 (Entity Evolution) ─── Phases 28-29
+  │
+  ├── Epic 11 (Bridge Retirement) ─── Phase 31
+  │
+  └── Epic 12 (Macro Compilation) ─── Phase 30 ──── DONE
 ```
 
-**Parallel tracks:** Epics 8 (Feedback Loop) and 9 (RAG Evolution) can proceed in parallel with Epics 5-7, as they share no code dependencies.
-
-**Critical path:** Epic 2 → Epic 4 → Epic 5 → Epic 6 → Epic 7
+**Critical path (active):** Epic 4 → Epic 6 → Epic 7. Epic 5 is deferred; Epic 8 is an independent track that can proceed in parallel.
 
 ---
 
@@ -274,8 +284,8 @@ Epic 1 (Core Platform)         ──── DONE ──────────�
 |---|---|---|---|
 | 0-8 | 1: Core Platform | Done | Foundation |
 | 9 | 2: Runtime Intelligence | Schema Fidelity | Native structured output, schema retry |
-| 10 | 2: Runtime Intelligence | Resilience & Routing | API retry, stage cache, cost-aware `model_policy:` |
-| 11 | 2: Runtime Intelligence | Context Budget | Budget allocator, BM25 ranking, pipeline budget propagation |
+| 10 | 2: Runtime Intelligence | Resilience | API retry, stage cache, stage retry, model fallback |
+| 11 | 2: Runtime Intelligence | Context Budget | Budget allocator, BM25 ranking; pipeline budget propagation (11D) planned |
 | 12 | 3: Composition UX | Discoverability | `--dry-run` resolved, port signatures, composition summaries |
 | 13 | 3: Composition UX | Authoring | `--fork-role`, error teaching, guardrail examples |
 | 14 | 4: Typed Ports | Capabilities | `capabilities:` field, capability resolver, `--find-role` |
@@ -289,9 +299,10 @@ Epic 1 (Core Platform)         ──── DONE ──────────�
 | 22 | 7: DAG Execution | Observability | DAG trace, per-branch cost, budget-aware fan-out |
 | 23 | 8: Feedback Loop | Evaluation | `metrics:` field, `--compare`, cost attribution |
 | 24 | 8: Feedback Loop | Testing | Role regression, role-as-judge, prompt distillation |
-| 25 | 9: RAG Evolution | Retrieval | Sibling expansion, metadata, incremental indexing |
-| 26 | 9: RAG Evolution | Composability | Role `rag:`, CLI RAG, multi-RAG, RAG-as-tool |
-| 27 | 9: RAG Evolution | Graph | Chunk adjacency, RAG trace |
+| 25 | 9: Knowledge Evolution | Compilation | EDP data model, knowledge compiler, AEVS restore-check, KB storage |
+| 26 | 9: Knowledge Evolution | Query | Tag-filter + BM25, graph walk, role `knowledge:`, multi-KB RRF |
+| 27 | 9: Knowledge Evolution | Evolution | Mutation API, ACE reflect/curate, attributed output |
 | 28 | 10: Entity Evolution | Composability | Agent-as-tool, configurable loop, macro chaining |
 | 29 | 10: Entity Evolution | Dynamism | ReactPolicy trait, agent memory |
+| 30 | 12: Developer Experience & Performance | Macro Compilation | Trait-based defaults, modular `register_client!`, slim `impl_client_trait!` |
 | 31 | 11: Bridge Retirement | MCP Pool Hardening | `ToolCall::eval` MCP routing, multi-server pool fix, portable `mcp.json` loader |

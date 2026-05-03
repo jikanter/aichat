@@ -1,6 +1,6 @@
 # Phase 11: Runtime Intelligence — Context Budget
 
-**Status:** Done
+**Status:** 11A/11B Done; 11C Superseded; 11D Planned
 **Epic:** 2 — Runtime Intelligence
 **Design:** [epic-2.md](../analysis/epic-2.md)
 
@@ -11,6 +11,7 @@
 | 11A. Context budget allocator core | Done | New `src/context_budget.rs`. Calculates: `remaining = max_input_tokens - output_reserve - fixed_allocations`. `ContextBudget::new` + `.remaining()` (saturating). Defaults: 4096 output reserve, 2048 safety margin for fixed allocations. |
 | 11B. BM25-ranked file inclusion | Done | Same module. `rank_files` + `select_within_budget` + `format_selection_summary`. Wired into `Input::from_files` — kicks in only when `-f` loads multiple files, a query is present, and the total would exceed the files budget. Skipped files logged to stderr; cuts at file boundaries (never slices mid-file). |
 | 11C. Budget-aware RAG | Superseded | **Not shipping.** The legacy `src/rag/` module is slated for deprecation when Phase 25A (Knowledge Compilation) lands, so widening `Rag::search()` would be throwaway work. The budget plumbing from 11A is instead consumed directly by [Phase 26A](./phase-26-knowledge-query.md) (tag-filter + BM25 query core), which is budget-aware from day one. |
+| 11D. Pipeline budget propagation | Planned | `budget_usd:` on a pipeline plus optional `budget_weight:` per stage. `pipe.rs:run()` computes per-stage budgets from total and passes them to each `run_stage_inner()`. Stages signal truncation rather than failing when a budget is approached. Reuses 11A's `ContextBudget` allocator per stage. Files: `src/pipe.rs`, `src/config/role.rs`. |
 
 **Parallelization:** 11A and 11B shipped together as one module (`src/context_budget.rs`); 11B consumes the `ContextBudget` helper from 11A.
 
