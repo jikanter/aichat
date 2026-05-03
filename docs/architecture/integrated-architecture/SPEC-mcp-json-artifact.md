@@ -2,7 +2,7 @@
 
 **Status:** Draft, 2026-05-01
 **Applies to:** aichat (this repo), [llm-functions](https://github.com/jikanter/personal-llm-functions), and any future harness that consumes MCP server declarations.
-**Companion:** [`bridge-retirement.md`](./bridge-retirement.md)
+**Companion:** [`bridge-retirement.md`](bridge-retirement.md)
 
 ## Purpose
 
@@ -123,7 +123,7 @@ This means **`config.yaml` no longer contains MCP server declarations as the can
 
 ## How llm-functions retires its bridge
 
-After the bridge retirement (see [`bridge-retirement.md`](./bridge-retirement.md)):
+After the bridge retirement (see [`bridge-retirement.md`](bridge-retirement.md)):
 
 1. The user copies `llm-functions/mcp.json` to `~/.config/mcp/mcp.json` once. Format conversion is a key rename if anything (`mcpServers` is already the top-level key in the bridge's `mcp.json`).
 2. `llm-functions/mcp.json` is deleted from the repo. The bridge is deleted with it.
@@ -133,7 +133,7 @@ Neither aichat nor llm-functions reads the other's filesystem. The portable file
 
 ## How a future harness would consume this file
 
-The harness interface (TBD; see [`README.md`](./README.md)) reads the same file via the same search order. It does not need aichat installed and does not need llm-functions installed. If the harness is the consumer of last resort, the user gets MCP tools without aichat in the picture at all.
+The harness interface (TBD; see [`README.md`](README.md)) reads the same file via the same search order. It does not need aichat installed and does not need llm-functions installed. If the harness is the consumer of last resort, the user gets MCP tools without aichat in the picture at all.
 
 This is the property that makes this artifact "portable": any consumer can read it, in any order of installation, without depending on any other consumer.
 

@@ -17,9 +17,9 @@ Documents that live entirely inside one project belong in that project's own roa
 
 Documents in this directory link between repos via **GitHub URLs**, not local filesystem paths. A user with only one repo cloned must be able to follow the docs to the other repo via GitHub. This rule applies in both directions: aichat docs link to llm-functions on GitHub; llm-functions docs link to this directory on GitHub.
 
-The portable artifacts these documents specify (e.g., `mcp.json` per [`SPEC-mcp-json-artifact.md`](./SPEC-mcp-json-artifact.md)) live **outside** both repos, in user-level config paths.
+The portable artifacts these documents specify (e.g., `mcp.json` per [`SPEC-mcp-json-artifact.md`](SPEC-mcp-json-artifact.md)) live **outside** both repos, in user-level config paths.
 
 ## Index
 
-- [`SPEC-mcp-json-artifact.md`](./SPEC-mcp-json-artifact.md) — Schema and discovery rules for the portable `mcp.json` declarations file. Aligned with Claude Code's `.mcp.json` dialect; aichat-specific extensions namespaced under `x-aichat`. Foundational input to bridge retirement.
-- [`bridge-retirement.md`](./bridge-retirement.md) — Plan to retire the Node HTTP bridge in `llm-functions/mcp/bridge/` in favor of the portable `mcp.json` artifact + aichat's native `mcp_pool`. Status: blocked on two upstream aichat bugs; tests and demo pinned in aichat to track readiness.
+- [`SPEC-mcp-json-artifact.md`](SPEC-mcp-json-artifact.md) — Schema and discovery rules for the portable `mcp.json` declarations file. Aligned with Claude Code's `.mcp.json` dialect; aichat-specific extensions namespaced under `x-aichat`. Foundational input to bridge retirement.
+- [`bridge-retirement.md`](bridge-retirement.md) — Plan to retire the Node HTTP bridge in `llm-functions/mcp/bridge/` in favor of the portable `mcp.json` artifact + aichat's native `mcp_pool`. Status: blocked on two upstream aichat bugs; tests and demo pinned in aichat to track readiness.

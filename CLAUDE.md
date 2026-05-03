@@ -11,6 +11,9 @@ AIchat is a command-line swiss army knife for ai applications.
 
 Read these files for background before starting work:
 - @docs/README.md
+- @docs/ROADMAP.md
+- @docs/architecture/integrated-architecture/README.md
+- @docs/architecture/architecture.md
 
 ## Deliverable
 A multi-tool for integrated interactions with AI models.
@@ -39,7 +42,7 @@ A multi-tool for integrated interactions with AI models.
 
 ## Integrated requirements
 
-Requirements that span more than one project (aichat ↔ llm-functions ↔ the future harness interface) live in `docs/roadmap/integrated-architecture/`. Anything purely internal to aichat stays in `docs/roadmap/` or `docs/architecture/`. See `docs/roadmap/integrated-architecture/README.md` for what qualifies.
+Requirements that span more than one project (aichat ↔ llm-functions ↔ the future harness interface) live in `docs/integrated-architecture/`. Anything purely internal to aichat stays in `docs/roadmap/` or `docs/architecture/`. See `docs/roadmap/integrated-architecture/README.md` for what qualifies.
 
 ## About
 

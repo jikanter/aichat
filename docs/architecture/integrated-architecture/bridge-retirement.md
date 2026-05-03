@@ -2,14 +2,14 @@
 
 **Status:** Blocked. Two upstream aichat fixes required before any of this can land.
 **Last updated:** 2026-05-01
-**Companion spec:** [`SPEC-mcp-json-artifact.md`](./SPEC-mcp-json-artifact.md)
+**Companion spec:** [`SPEC-mcp-json-artifact.md`](SPEC-mcp-json-artifact.md)
 **Validation:** `tests/integration/mcp-server.sh`, `docs/demos/demo-mcp-server.md`
 
 ## Goal
 
 Retire the Node + Express HTTP bridge in [llm-functions/mcp/bridge/](https://github.com/jikanter/personal-llm-functions/tree/main/mcp/bridge) (port 8808). Replace it with two pieces:
 
-1. A **portable `mcp.json` artifact** at `~/.config/mcp/mcp.json` — declarations live here, owned by neither aichat nor llm-functions. Schema specified in [`SPEC-mcp-json-artifact.md`](./SPEC-mcp-json-artifact.md).
+1. A **portable `mcp.json` artifact** at `~/.config/mcp/mcp.json` — declarations live here, owned by neither aichat nor llm-functions. Schema specified in [`SPEC-mcp-json-artifact.md`](SPEC-mcp-json-artifact.md).
 2. **aichat's native MCP client** (`mcp_pool`) — reads the portable file and consumes external MCP servers directly via stdio/HTTP.
 
 After retirement:
@@ -25,7 +25,7 @@ After retirement:
 - The CLI itself (`aichat -r role`, `aichat --each`, `aichat call …`) — humans, scripts, and `argc`-driven pipelines.
 - The HTTP server (`aichat --serve`) — OpenAI-compatible API, OpenWebUI integration. Phases 16-18 (deferred).
 - The trace JSONL — the test harness, eval, and (future) training pipelines. See [`docs/analysis/open-harness/ECOSYSTEM.md`](../../analysis/open-harness/ECOSYSTEM.md).
-- The future harness interface (TBD; see [`README.md`](./README.md)) — the cross-tool consumption point that lets agentic clients see aichat's roles, agents, and tools as a single unit.
+- The future harness interface (TBD; see [`README.md`](README.md)) — the cross-tool consumption point that lets agentic clients see aichat's roles, agents, and tools as a single unit.
 
 This plan retires the Node bridge so `aichat --mcp` and `mcp_pool` can do their jobs cleanly. It does **not** elevate `aichat --mcp` to "the surface." If the harness interface materializes and supersedes the MCP exposure, that is a separate decision; this plan does not block it.
 
@@ -79,7 +79,7 @@ Before executing the retirement diff, all four must hold:
 
 1. `bats tests/integration/mcp-server.sh` reports 7/7 passing (no skips).
 2. `showboat verify docs/demos/demo-mcp-server.md` exits 0 with the "Known limitation" sections re-purposed to document the fixed behavior.
-3. End-to-end: `aichat --mcp` from a clean checkout, with `mcp_servers_file:` pointing at a portable `mcp.json` per [`SPEC-mcp-json-artifact.md`](./SPEC-mcp-json-artifact.md), can list AND invoke at least one tool from each of the user's 10 production servers.
+3. End-to-end: `aichat --mcp` from a clean checkout, with `mcp_servers_file:` pointing at a portable `mcp.json` per [`SPEC-mcp-json-artifact.md`](SPEC-mcp-json-artifact.md), can list AND invoke at least one tool from each of the user's 10 production servers.
 4. The portable `mcp.json` validates against the schema in `SPEC-mcp-json-artifact.md` § Validation.
 
 ## The retirement diff
@@ -156,7 +156,7 @@ If anything outside aichat or llm-functions calls `http://localhost:8808/tools` 
 
 - `aichat --mcp` (stdio MCP) for tool listing and invocation, or
 - `aichat --list-tools --mcp-server "<command>"` for a one-off probe of a single server, or
-- (future) the harness interface — see [`README.md`](./README.md).
+- (future) the harness interface — see [`README.md`](README.md).
 
 `grep -r "8808\|MCP_BRIDGE_PORT\|mcp/bridge\|run-mcp-tool"` across the user's scripts directories should turn up empty before the bridge directory is deleted.
 
