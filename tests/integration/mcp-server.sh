@@ -117,17 +117,10 @@ LIST_MSG='{"jsonrpc":"2.0","id":2,"method":"tools/list","params":{}}'
 
 @test "mcp-server: tool-call dispatch through mcp_servers pool (probe a)" {
   # Confirms aichat --mcp can actually INVOKE an mcp_servers tool, not just list
-  # it. Captured during the bridge-retirement validation pass on 2026-05-01.
-  #
-  # As of aichat 0.5.1-eridian this fails: ToolCall::eval (function.rs:337) does
-  # not have an MCP-pool routing branch parallel to eval_tool_calls
-  # (function.rs:33-44). The single-call path used by mcp.rs:191 falls through
-  # to the llm-functions binary lookup and fails with "binary not found".
-  #
-  # Unskip this test when ToolCall::eval grows the same is_mcp /
-  # mcp_pool.call() routing as eval_tool_calls.
-  skip "blocked: ToolCall::eval lacks MCP routing — see function.rs:33-44 vs 337"
-
+  # it. Captured during the bridge-retirement validation pass on 2026-05-01;
+  # unskipped in Phase 31A once ToolCall::eval grew the same is_mcp /
+  # mcp_pool.call() routing as eval_tool_calls (`is_mcp_call` helper in
+  # src/function.rs).
   cfg="$BATS_TEST_TMPDIR/aichat"
   write_config "$cfg" "mcp_servers:
   git:

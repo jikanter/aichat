@@ -251,16 +251,45 @@ impl McpConnectionPool {
         Ok(())
     }
 
-    /// Return tool declarations from all configured servers, connecting lazily.
+    /// Return tool declarations from all configured servers, connecting concurrently.
+    ///
+    /// Phase 31B: connect each server in its own task so a single hung/slow
+    /// server cannot block the others, and per-server failures are isolated
+    /// rather than fail-fast. A misbehaving stdio child (e.g. one that drops
+    /// the initialize handshake or never responds to `tools/list`) used to
+    /// abort the whole loop before reaching later entries — the reported
+    /// "5-server subset returns 0 registered tools" symptom in
+    /// `docs/architecture/integrated-architecture/bridge-retirement.md` was
+    /// this fail-fast pattern, not a tokio runtime saturation issue.
     pub async fn all_tool_declarations(&self) -> Result<Vec<FunctionDeclaration>> {
         let names: Vec<String> = self.configs.keys().cloned().collect();
+
+        let connect_futures = names.iter().map(|name| {
+            let name = name.clone();
+            async move {
+                let result = self.get_or_connect(&name).await;
+                (name, result)
+            }
+        });
+        let results = futures_util::future::join_all(connect_futures).await;
+
         let mut all_decls = Vec::new();
-        for name in &names {
-            self.get_or_connect(name).await?;
-            let conns = self.connections.read().await;
-            if let Some(conn) = conns.get(name) {
-                for tool in conn.tools() {
-                    all_decls.push(mcp_tool_to_declaration(tool, name));
+        let conns = self.connections.read().await;
+        for (name, result) in results {
+            match result {
+                Ok(()) => {
+                    if let Some(conn) = conns.get(&name) {
+                        for tool in conn.tools() {
+                            all_decls.push(mcp_tool_to_declaration(tool, &name));
+                        }
+                    }
+                }
+                Err(e) => {
+                    warn!(
+                        "MCP server '{name}' failed to register: {e}\n\
+                         hint: this server's tools will not be available; \
+                         remove it from mcp_servers or fix the config to silence this warning"
+                    );
                 }
             }
         }

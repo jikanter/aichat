@@ -34,6 +34,7 @@ Roles are the fundamental unit of composition. This roadmap evolves roles from s
 | 8 | Feedback Loop | 23-24 | **New** | Theme 2: ML Engineer + ML App Engineer |
 | 9 | RAG Evolution | 25-27 | Planned | [epic-4.md](./analysis/epic-4.md) |
 | 10 | Entity Evolution | 28-29 | Planned | [epic-5.md](./analysis/epic-5.md) |
+| 11 | Bridge Retirement & MCP Pool Hardening | 31 | **New** | [bridge-retirement.md](./architecture/integrated-architecture/bridge-retirement.md) |
 
 Architecture reference: [architecture.md](architecture/architecture.md)
 Completed Epics: [completed-epics.md](archive/roadmap/completed-epics.md)
@@ -192,6 +193,16 @@ Completed Epics: [completed-epics.md](archive/roadmap/completed-epics.md)
 
 ---
 
+## Epic 11: Bridge Retirement & MCP Pool Hardening -- [design](./architecture/integrated-architecture/bridge-retirement.md)
+
+*Two upstream aichat fixes plus a portable-file loader, gated by `tests/integration/mcp-server.sh`. Lands the aichat-side enablement for retiring the Node HTTP bridge in [llm-functions](https://github.com/jikanter/personal-llm-functions). The retirement diff in `llm-functions` is out of scope for this repo.*
+
+### Phase 31: Bridge Retirement & MCP Pool Hardening
+
+[Phase 31 Overview](./roadmap/phase-31-overview.md)
+
+---
+
 ## Cross-Epic Dependency Graph
 
 ```
@@ -283,3 +294,4 @@ Epic 1 (Core Platform)         ──── DONE ──────────�
 | 27 | 9: RAG Evolution | Graph | Chunk adjacency, RAG trace |
 | 28 | 10: Entity Evolution | Composability | Agent-as-tool, configurable loop, macro chaining |
 | 29 | 10: Entity Evolution | Dynamism | ReactPolicy trait, agent memory |
+| 31 | 11: Bridge Retirement | MCP Pool Hardening | `ToolCall::eval` MCP routing, multi-server pool fix, portable `mcp.json` loader |

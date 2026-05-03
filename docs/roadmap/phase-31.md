@@ -1,4 +1,8 @@
 # Phase 31
 
-Right now this is just a placeholder for the new integrated architecture for mcp servers described in
-[bridge-retirement](../architecture/integrated-architecture/bridge-retirement.md)
+Moved to:
+
+- [Phase 31 Overview](./phase-31-overview.md)
+- [Phase 31 Detail](./phase-31-bridge-retirement.md)
+
+Cross-cutting design: [bridge-retirement.md](../architecture/integrated-architecture/bridge-retirement.md), [SPEC-mcp-json-artifact.md](../architecture/integrated-architecture/SPEC-mcp-json-artifact.md)
