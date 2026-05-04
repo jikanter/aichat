@@ -4,8 +4,8 @@ use crate::client::{
     call_chat_completions, call_chat_completions_streaming, call_react, CallMetrics,
 };
 use crate::config::{
-    run_lifecycle_hooks, validate_schema_traced, Config, GlobalConfig, Input, RoleLike,
-    RolePipelineStage,
+    pipeline_stage_admissible, run_lifecycle_hooks, validate_schema_traced, Agent, Config,
+    EntityRef, GlobalConfig, Input, Role, RoleLike, RolePipelineStage,
 };
 use crate::utils::*;
 
@@ -237,6 +237,41 @@ async fn run_stage(
     unreachable!("fallback loop exited without terminating");
 }
 
+/// Phase 19C: load the entity for a pipeline stage. Roles use the existing
+/// path; agents are loaded via `Agent::init` and bridged to a Role through
+/// the `RoleLike::to_role()` synthesis. Macros are rejected — they aren't
+/// role-shaped.
+///
+/// Caveats for the agent path:
+/// - Agent variables are not interactively resolved here. Defaults (including
+///   shell defaults) apply; missing required variables leave `{{var}}` tokens
+///   in the prompt unrendered.
+/// - Agent RAG is loaded only if a pre-built RAG file exists. There is no
+///   interactive "init RAG?" prompt in the pipeline path.
+async fn resolve_stage_entity(
+    config: &GlobalConfig,
+    raw_name: &str,
+    abort_signal: AbortSignal,
+) -> Result<Role> {
+    let entity = config
+        .read()
+        .classify_entity(raw_name)
+        .with_context(|| format!("Failed to resolve pipeline stage '{raw_name}'"))?;
+    pipeline_stage_admissible(&entity)?;
+    match entity {
+        EntityRef::Role(name) => config.read().retrieve_role(&name).with_context(|| {
+            format!("Failed to load role '{name}' for pipeline stage")
+        }),
+        EntityRef::Agent(name) => {
+            let agent = Agent::init(config, &name, abort_signal)
+                .await
+                .with_context(|| format!("Failed to load agent '{name}' for pipeline stage"))?;
+            Ok(agent.to_role())
+        }
+        EntityRef::Macro(_) => unreachable!("rejected by pipeline_stage_admissible above"),
+    }
+}
+
 async fn run_stage_inner(
     config: &GlobalConfig,
     stage: &PipelineStage,
@@ -244,10 +279,7 @@ async fn run_stage_inner(
     is_last: bool,
     abort_signal: AbortSignal,
 ) -> Result<(String, CallMetrics)> {
-    let role = config
-        .read()
-        .retrieve_role(&stage.role_name)
-        .with_context(|| format!("Failed to load role '{}' for pipeline stage", stage.role_name))?;
+    let role = resolve_stage_entity(config, &stage.role_name, abort_signal.clone()).await?;
 
     if let Some(model_id) = &stage.model_id {
         config.write().set_model(model_id)?;

@@ -1,5 +1,7 @@
 use crate::client::Model;
-use crate::config::{Config, Role, RoleLike};
+use crate::config::{
+    pipeline_stage_admissible, Config, EntityRef, Role, RoleLike,
+};
 use crate::function::FunctionDeclaration;
 
 use anyhow::{bail, Result};
@@ -50,10 +52,34 @@ pub fn validate_pipeline_stages(
     config: &Config,
     stages: &[(String, Option<String>)],
 ) -> Result<()> {
-    for (index, (role_name, model_id)) in stages.iter().enumerate() {
-        let role = config.retrieve_role(role_name).map_err(|e| {
+    for (index, (raw_name, model_id)) in stages.iter().enumerate() {
+        // Phase 19B/C: classify the stage name first. Agents and macros need
+        // different handling than roles.
+        let entity = config.classify_entity(raw_name).map_err(|e| {
             anyhow::anyhow!(
-                "Preflight: pipeline stage {} references unknown role '{}': {}",
+                "Preflight: pipeline stage {} references unknown entity '{}': {}",
+                index + 1,
+                raw_name,
+                e
+            )
+        })?;
+        pipeline_stage_admissible(&entity).map_err(|e| {
+            anyhow::anyhow!("Preflight: pipeline stage {}: {}", index + 1, e)
+        })?;
+
+        // Phase 19C: agent-stage capability validation requires async
+        // `Agent::init` and is deferred to stage execution. We've confirmed
+        // the agent name exists (classification passed) — that's the
+        // strongest sync check we can offer here.
+        let role_name = match &entity {
+            EntityRef::Role(name) => name.clone(),
+            EntityRef::Agent(_) => continue,
+            EntityRef::Macro(_) => unreachable!("rejected by pipeline_stage_admissible"),
+        };
+
+        let role = config.retrieve_role(&role_name).map_err(|e| {
+            anyhow::anyhow!(
+                "Preflight: pipeline stage {} failed to load role '{}': {}",
                 index + 1,
                 role_name,
                 e

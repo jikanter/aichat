@@ -42,7 +42,7 @@ dependencies = [
 
 [[package]]
 name = "aichat"
-version = "0.5.2-eridian"
+version = "0.5.3-eridian"
 dependencies = [
  "ansi_colours",
  "anyhow",

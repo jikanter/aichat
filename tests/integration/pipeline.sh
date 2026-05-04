@@ -20,7 +20,7 @@ teardown() {
 @test "pipeline: --stage with invalid role fails preflight" {
   run "$AICHAT_BIN" --pipe --stage non-existent-role --dry-run "test"
   [ "$status" -ne 0 ]
-  [[ "$output" == *"references unknown role 'non-existent-role'"* ]]
+  [[ "$output" == *"references unknown entity 'non-existent-role'"* ]]
 }
 
 @test "pipeline: --pipe-def with non-existent file fails" {

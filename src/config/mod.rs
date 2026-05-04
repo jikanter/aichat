@@ -1,11 +1,15 @@
 pub mod agent;
 pub mod input;
 pub mod preflight;
+pub mod resolver;
 pub mod role;
 pub mod session;
 pub mod prompt;
 
 pub use self::agent::{complete_agent_variables, list_agents, Agent, AgentVariables};
+pub use self::resolver::{
+    classify_address, pipeline_stage_admissible, EntityRef, RoleAddress, RoleResolver,
+};
 pub use self::input::Input;
 pub use self::role::{
     run_lifecycle_hooks, validate_schema, validate_schema_detailed, validate_schema_traced,
@@ -396,6 +400,12 @@ impl Default for Config {
 }
 
 pub type GlobalConfig = Arc<RwLock<Config>>;
+
+impl RoleResolver for Config {
+    fn resolve(&self, address: &str) -> Result<EntityRef> {
+        self.resolve_entity(address)
+    }
+}
 
 impl Config {
     pub async fn init(working_mode: WorkingMode, info_flag: bool) -> Result<Self> {
@@ -1236,6 +1246,30 @@ impl Config {
         Ok(())
     }
 
+    /// Phase 19A/19B: classify an address into role / agent / macro without
+    /// loading the entity. Honors explicit `agent:` / `macro:` prefixes; bare
+    /// names try roles → agents → macros. `remote:` and `mcp:` parse but
+    /// resolution is deferred (Phase 20 / future epic).
+    pub fn classify_entity(&self, input: &str) -> Result<EntityRef> {
+        let address = RoleAddress::parse(input)?;
+        let role_names: HashSet<String> = Self::list_roles(true).into_iter().collect();
+        let agent_names: HashSet<String> = list_agents().into_iter().collect();
+        let macro_names: HashSet<String> = Self::list_macros().into_iter().collect();
+        classify_address(
+            &address,
+            |n| role_names.contains(n),
+            |n| agent_names.contains(n),
+            |n| macro_names.contains(n),
+        )
+    }
+
+    /// Phase 19A/19B: resolve an address. Currently identical to
+    /// `classify_entity`; Phase 20 will dispatch `remote:` addresses to a
+    /// `RemoteRoleResolver` here.
+    pub fn resolve_entity(&self, input: &str) -> Result<EntityRef> {
+        self.classify_entity(input)
+    }
+
     pub fn retrieve_role(&self, name: &str) -> Result<Role> {
         let mut role = Role::resolve(name)?;
         // Apply role variables before model interpolation
@@ -1244,32 +1278,21 @@ impl Config {
             role.apply_variables(&resolved);
         }
 
-        // Phase 6C: Auto-bind MCP server tools to the role's use_tools
+        // Phase 6C: Auto-bind MCP server tools to the role's use_tools.
+        // Phase 19D extracted this into `resolver::expand_mcp_servers_into_use_tools`
+        // so agents can reuse the exact same expansion semantics.
         if !role.role_mcp_servers().is_empty() {
-            let mcp_prefixes: Vec<String> = role
-                .role_mcp_servers()
-                .iter()
-                .filter(|s| self.mcp_servers.contains_key(s.as_str()))
-                .map(|s| format!("{s}:*"))
-                .collect();
-            if !mcp_prefixes.is_empty() {
-                let existing = role.use_tools().unwrap_or_default().to_string();
-                let combined = if existing.is_empty() {
-                    mcp_prefixes.join(",")
-                } else {
-                    format!("{},{}", existing, mcp_prefixes.join(","))
-                };
-                role.set_use_tools(Some(combined));
-            }
-            // Warn about unknown MCP server names
-            for s in role.role_mcp_servers() {
-                if !self.mcp_servers.contains_key(s.as_str()) {
-                    warn!(
-                        "Role '{}' references unknown mcp_server '{}' — not in global config",
-                        name, s
-                    );
-                }
-            }
+            let available: HashSet<&str> = self.mcp_servers.keys().map(|s| s.as_str()).collect();
+            let mcp_servers = role.role_mcp_servers().to_vec();
+            let current = role.use_tools();
+            let new_use_tools = resolver::expand_mcp_servers_into_use_tools(
+                "Role",
+                name,
+                &mcp_servers,
+                current.as_deref(),
+                &available,
+            );
+            role.set_use_tools(new_use_tools);
         }
 
         let current_model = self.current_model().clone();

@@ -1,7 +1,7 @@
 # AIChat Roadmap
 
-**Last updated:** 2026-04-07
-**317 tests passing (144 unit + 173 compatibility), 0 failures**
+**Last updated:** 2026-05-04
+**649 tests passing (452 unit + 197 compatibility), 0 failures**
 
 ---
 
@@ -28,12 +28,12 @@ Roles are the fundamental unit of composition. This roadmap evolves roles from s
 | 3 | Composition UX | 12-13 | Planned | [epic-3.md](./analysis/epic-3.md) |
 | 4 | Typed Ports & Capabilities | 14-15 | Planned | [epic-4.md](./analysis/epic-4.md) |
 | 5 | Server Pipeline Engine | 16-18 | **Deferred 2026-04-17** | [epic-5.md](./analysis/epic-5.md) |
-| 6 | Universal Addressing | 19-20 | Planned | [epic-6.md](./analysis/epic-6.md) |
+| 6 | Universal Addressing | 19-20 | Phase 19 **Done**; Phase 20 blocked on Epic 5 Phase 17B | [epic-6.md](./analysis/epic-6.md) |
 | 7 | DAG Execution | 21-22 | Planned | [epic-7.md](./analysis/epic-7.md) |
 | 8 | Feedback Loop | 23-24 | Planned | [epic-8.md](./analysis/epic-8.md) |
 | 9 | Knowledge Evolution | 25-27 | **Done** | [epic-9.md](./analysis/epic-9.md) |
 | 10 | Entity Evolution | 28-29 | Planned | [epic-10.md](./analysis/epic-10.md) |
-| 11 | Bridge Retirement & MCP Pool Hardening | 31 | **New** | [bridge-retirement.md](./architecture/integrated-architecture/bridge-retirement.md) |
+| 11 | Bridge Retirement & MCP Pool Hardening | 31 | **Done** | [bridge-retirement.md](./architecture/integrated-architecture/bridge-retirement.md) |
 | 12 | Developer Experience & Performance | 30 | **Done** | -- |
 
 Architecture reference: [architecture.md](architecture/architecture.md)
@@ -197,6 +197,8 @@ Completed Epics: [completed-epics.md](archive/roadmap/completed-epics.md)
 
 *Two upstream aichat fixes plus a portable-file loader, gated by `tests/integration/mcp-server.sh`. Lands the aichat-side enablement for retiring the Node HTTP bridge in [llm-functions](https://github.com/jikanter/personal-llm-functions). The retirement diff in `llm-functions` is out of scope for this repo.*
 
+**Status (2026-05-04):** All five items (31A–31E) shipped. All four validation gates green: 10/10 mcp-server.sh passing (no skips), 9/9 mcp-validate.sh passing, demo refreshed, portable loader live. Bridge deletion in `llm-functions` is unblocked.
+
 ### Phase 31: Bridge Retirement & MCP Pool Hardening
 
 [Phase 31 Overview](./roadmap/phase-31-overview.md)
@@ -234,7 +236,7 @@ Epic 1 (Core Platform)         ──── DONE ──────────�
   │
   ├── Epic 10 (Entity Evolution) ─── Phases 28-29
   │
-  ├── Epic 11 (Bridge Retirement) ─── Phase 31
+  ├── Epic 11 (Bridge Retirement) ─── Phase 31 ──── DONE
   │
   └── Epic 12 (Macro Compilation) ─── Phase 30 ──── DONE
 ```

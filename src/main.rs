@@ -98,13 +98,47 @@ async fn main() -> Result<()> {
     Ok(())
 }
 
-async fn run(config: GlobalConfig, cli: Cli, text: Option<String>) -> Result<()> {
+async fn run(config: GlobalConfig, mut cli: Cli, text: Option<String>) -> Result<()> {
     if cli.mcp {
         return mcp::run(config).await;
     }
 
     if let Some(ref server_cmd) = cli.mcp_server {
         return mcp_client::run_mcp_client_command(&cli, server_cmd).await;
+    }
+
+    // Phase 19B: unified `-r` resolution. If the name given to `-r` resolves
+    // to an agent or macro instead of a role (or carries an `agent:` /
+    // `macro:` prefix), reroute to the matching dispatch slot. `-a` and
+    // `--macro` remain authoritative — never override an explicitly-set slot.
+    if cli.role.is_some() && cli.agent.is_none() && cli.macro_name.is_none() {
+        let role_name = cli.role.clone().unwrap();
+        let has_prefix = role_name.starts_with("agent:")
+            || role_name.starts_with("macro:")
+            || role_name.starts_with("remote:")
+            || role_name.starts_with("mcp:");
+        match config.read().classify_entity(&role_name) {
+            Ok(config::EntityRef::Role(_)) => {}
+            Ok(config::EntityRef::Agent(name)) => {
+                cli.role = None;
+                cli.agent = Some(name);
+            }
+            Ok(config::EntityRef::Macro(name)) => {
+                cli.role = None;
+                cli.macro_name = Some(name);
+            }
+            Err(e) if has_prefix => {
+                // The user's explicit prefix told us exactly what they meant;
+                // surface the precise classification error rather than letting
+                // `use_role` mask it with a generic "unknown role" message.
+                return Err(e);
+            }
+            Err(_) => {
+                // Bare name with no prefix: fall through to `use_role`, which
+                // will raise its own role-flavored error if the file isn't
+                // there. Preserves the legacy code path.
+            }
+        }
     }
 
     if cli.pipe {
