@@ -3,8 +3,9 @@
 Source for the pi-coding-agent TypeScript extension that aichat stages into
 `<cwd>/.pi/extensions/` when launched with `--pi-repl`. Pi auto-discovers the
 extension on startup and exposes aichat's roles, agents, sessions, RAG, and
-macros as `/role`, `/agent`, `/session`, `/rag`, `/macro`, `/info`, and
-`/exit-context` slash commands. Each command makes an authenticated HTTP
+macros as `/role`, `/agent`, `/aichat-session`, `/rag`, `/macro`, `/info`,
+and `/exit-context` slash commands. (`/aichat-session` is namespaced to
+avoid colliding with pi's built-in `/session` command.) Each command makes an authenticated HTTP
 call back into the aichat server running in-process on
 `$AICHAT_BRIDGE_URL`.
 

@@ -66,7 +66,7 @@ Pi's own commands (`/model`, `/new`, `/fork`, `/clone`, `/compact`, `/copy`,
 | `.role <name>` | `/role <name>` | Switches active role on aichat's `Config`. |
 | `.role <name> <text>` | `/role <name>` then send `<text>` | One-shot role + prompt is a two-step in pi. |
 | `.prompt <text>` | `/role <name>` (temp `%%`) then send | Or just send the prompt — pi has its own send mechanic. |
-| `.session [name]` | `/session [name]` | Without a name, opens a temp session. |
+| `.session [name]` | `/aichat-session [name]` | Without a name, opens a temp session. Namespaced because pi reserves `/session`. |
 | `.empty session` | not yet bridged | Use pi's `/new` to drop the conversation. |
 | `.compress session` | not yet bridged | Use pi's `/compact` instead. |
 | `.agent <name> [session]` | `/agent <name> [session]` | Binds an aichat agent for subsequent turns. |
@@ -90,7 +90,7 @@ Pi's own commands (`/model`, `/new`, `/fork`, `/clone`, `/compact`, `/copy`,
 
 "Not yet bridged" entries land in follow-up phases. The endpoints are
 already defined in `src/serve.rs` for `/role`, `/agent`, `/macro`, `/rag`,
-`/session`, `/info`, `/exit-context`; the others ride on the same HTTP
+`/aichat-session`, `/info`, `/exit-context`; the others ride on the same HTTP
 contract once an extension command is registered.
 
 ### `/info`

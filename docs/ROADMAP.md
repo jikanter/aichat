@@ -223,7 +223,7 @@ Completed Epics: [completed-epics.md](archive/roadmap/completed-epics.md)
 ### Phase 32: Pi as REPL Surface
 
 - **Phase 32A — Orchestration scaffold:** `--pi-repl` flag, ephemeral-port server start, env contract, exit propagation.
-- **Phase 32B — Extension bundle + bridge endpoints:** `assets/pi-extensions/aichat-bridge.js` registers `/role`, `/agent`, `/macro`, `/rag`, `/session`, `/info`, `/exit-context`; `/v1/state/*` routes gated by per-launch bearer token.
+- **Phase 32B — Extension bundle + bridge endpoints:** `assets/pi-extensions/aichat-bridge.js` registers `/role`, `/agent`, `/macro`, `/rag`, `/aichat-session`, `/info`, `/exit-context`; `/v1/state/*` routes gated by per-launch bearer token. (`/aichat-session` is namespaced to avoid colliding with pi's built-in `/session`.)
 - **Phase 32C — Session migration + docs:** `Session::export_to_pi_jsonl` and `aichat --convert-session <name> --to pi --out PATH`; new user guide ([`repl-pi.md`](./repl-pi.md)) and migration playbook ([`migrations/pi-repl-migration.md`](./migrations/pi-repl-migration.md)).
 - **Phase 32D — Cutover:** pi is the default REPL surface; `--legacy-repl` / `AICHAT_REPL=legacy` keep the built-in REPL available with no scheduled removal date.
 

@@ -105,8 +105,8 @@ export default function aichatBridge(pi: ExtensionAPI): void {
 		},
 	});
 
-	pi.registerCommand("session", {
-		description: "Start/switch an aichat session (use without args for a temp session)",
+	pi.registerCommand("aichat-session", {
+		description: "Start/switch an aichat session (use without args for a temp session). Renamed from /session to avoid colliding with pi's built-in /session command.",
 		handler: async (args: string, ctx: ExtensionCommandContext) => {
 			const name = args.trim() || undefined;
 			await runWithFeedback(
