@@ -26,9 +26,9 @@ Install pi with `curl -fsSL https://pi.dev/install.sh | sh` or
 `npm install -g @earendil-works/pi-coding-agent`. aichat slash commands
 (`/role`, `/agent`, `/macro`, `/rag`, `/session`, `/info`,
 `/exit-context`) are surfaced inside pi by a bundled extension that talks
-to an in-process aichat server. See [`docs/repl-pi.md`](docs/repl-pi.md)
+to an in-process aichat server. See [`docs/repl-pi.md`](docs/features/repl-pi.md)
 for the full command map and
-[`docs/migrations/pi-repl-migration.md`](docs/migrations/pi-repl-migration.md)
+[`docs/features/pi-repl-migration.md`](docs/features/pi-repl-migration.md)
 for the existing-user playbook (including `aichat --convert-session` for
 lifting aichat session YAML into pi's tree format).
 
