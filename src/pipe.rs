@@ -5,11 +5,13 @@ use crate::client::{
 };
 use crate::config::{
     pipeline_stage_admissible, run_lifecycle_hooks, validate_schema_traced, Agent, Config,
-    EntityRef, GlobalConfig, Input, Role, RoleLike, RolePipelineStage,
+    EntityRef, GlobalConfig, Input, MergeStrategy, ParallelNode, PipelineNode, Role, RoleLike,
+    RolePipelineStage, SwitchNode,
 };
 use crate::utils::*;
 
 use anyhow::{bail, Context, Result};
+use futures_util::future::join_all;
 use serde::{Deserialize, Serialize};
 use std::path::Path;
 
@@ -18,7 +20,7 @@ struct PipelineStage {
     model_id: Option<String>,
 }
 
-#[derive(Serialize)]
+#[derive(Serialize, Clone)]
 struct StageTrace {
     role: String,
     model: String,
@@ -26,12 +28,21 @@ struct StageTrace {
     output_tokens: u64,
     cost_usd: f64,
     latency_ms: u64,
+    /// Phase 21: when set, this stage ran inside a fan-out and the value is
+    /// the 1-based branch number within the parent `parallel:` node.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    branch: Option<usize>,
 }
 
 #[derive(Deserialize)]
 struct PipelineDef {
+    /// Sequential form (preserved for backward compat).
     #[serde(default)]
     stages: Vec<PipelineStageDef>,
+    /// Phase 21: full DAG form, mirroring the role-frontmatter `pipeline:`
+    /// key. Either `stages:` or `pipeline:` must be set, not both.
+    #[serde(default)]
+    pipeline: Option<Vec<serde_json::Value>>,
 }
 
 #[derive(Deserialize)]
@@ -41,25 +52,34 @@ struct PipelineStageDef {
 }
 
 pub async fn run(config: GlobalConfig, cli: Cli, text: Option<String>) -> Result<()> {
-    let stages = if let Some(def_path) = &cli.pipe_def {
-        load_pipeline_def(def_path)?
+    // Phase 21: `--pipe-def` may carry a DAG; `--stage` is always sequential.
+    let nodes: Vec<PipelineNode> = if let Some(def_path) = &cli.pipe_def {
+        load_pipeline_def_nodes(def_path)?
     } else if !cli.stages.is_empty() {
         parse_stages(&cli.stages)?
+            .into_iter()
+            .map(|s| {
+                PipelineNode::Stage(RolePipelineStage {
+                    role: s.role_name,
+                    model: s.model_id,
+                })
+            })
+            .collect()
     } else {
         bail!("Pipeline requires --stage or --pipe-def");
     };
 
-    if stages.is_empty() {
+    if nodes.is_empty() {
         bail!("Pipeline has no stages");
     }
 
-    // Phase 9D: pre-flight validate every stage's role/model before any LLM call
+    // Phase 9D + 21D: pre-flight validate every stage reachable through the
+    // DAG (parallel branches + switch arms count) before any LLM call.
     {
-        let stage_tuples: Vec<(String, Option<String>)> = stages
-            .iter()
-            .map(|s| (s.role_name.clone(), s.model_id.clone()))
-            .collect();
+        let stage_tuples = collect_preflight_stages(&nodes);
         crate::config::preflight::validate_pipeline_stages(&config.read(), &stage_tuples)?;
+        crate::config::preflight::validate_pipeline_dag_structure(&nodes)
+            .context("Pipeline DAG validation failed")?;
     }
 
     let mut input_text = match text {
@@ -82,28 +102,22 @@ pub async fn run(config: GlobalConfig, cli: Cli, text: Option<String>) -> Result
     let abort_signal = create_abort_signal();
     let output_format = cli.output_format;
 
-    let stage_count = stages.len();
+    let node_count = nodes.len();
     let mut stage_traces: Vec<StageTrace> = Vec::new();
-    for (i, stage) in stages.iter().enumerate() {
-        let is_last = i == stage_count - 1;
-        let (output, metrics) = run_stage(
+    for (i, node) in nodes.iter().enumerate() {
+        let is_last = i == node_count - 1;
+        let (output, mut traces) = run_node(
             &config,
-            stage,
+            node,
             i,
-            stage_count,
+            node_count,
             &input_text,
             is_last,
+            None,
             abort_signal.clone(),
         )
         .await?;
-        stage_traces.push(StageTrace {
-            role: stage.role_name.clone(),
-            model: metrics.model_id.clone(),
-            input_tokens: metrics.input_tokens,
-            output_tokens: metrics.output_tokens,
-            cost_usd: metrics.cost_usd,
-            latency_ms: metrics.latency_ms,
-        });
+        stage_traces.append(&mut traces);
         input_text = output;
     }
 
@@ -123,6 +137,24 @@ pub async fn run(config: GlobalConfig, cli: Cli, text: Option<String>) -> Result
     }
 
     Ok(())
+}
+
+/// Phase 21D: flatten a pipeline DAG into `(role_name, model_id)` tuples
+/// for preflight. Reaches into parallel branches and switch arms so an
+/// unknown role anywhere in the tree fails before any LLM call. Custom
+/// merge roles are also surfaced (with no model override, since they
+/// inherit the role's own model).
+fn collect_preflight_stages(nodes: &[PipelineNode]) -> Vec<(String, Option<String>)> {
+    let mut out = Vec::new();
+    for n in nodes {
+        for s in n.all_stages() {
+            out.push((s.role.clone(), s.model.clone()));
+        }
+        for merger in n.merge_role_names() {
+            out.push((merger, None));
+        }
+    }
+    out
 }
 
 async fn run_stage(
@@ -494,7 +526,7 @@ fn parse_stages(stage_specs: &[String]) -> Result<Vec<PipelineStage>> {
         .collect()
 }
 
-fn load_pipeline_def(path: &str) -> Result<Vec<PipelineStage>> {
+fn load_pipeline_def_nodes(path: &str) -> Result<Vec<PipelineNode>> {
     let path = Path::new(path);
     let content = if path.exists() {
         std::fs::read_to_string(path)
@@ -521,48 +553,63 @@ fn load_pipeline_def(path: &str) -> Result<Vec<PipelineStage>> {
     let def: PipelineDef =
         serde_yaml::from_str(&content).context("Failed to parse pipeline definition YAML")?;
 
-    Ok(def
-        .stages
-        .into_iter()
-        .map(|s| PipelineStage {
-            role_name: s.role,
-            model_id: s.model,
-        })
-        .collect())
+    if def.pipeline.is_some() && !def.stages.is_empty() {
+        bail!(
+            "Pipeline definition has both `stages:` and `pipeline:` — pick one. \
+             Use `pipeline:` for DAG primitives (parallel/switch) and `stages:` \
+             for purely sequential roles."
+        );
+    }
+
+    if let Some(items) = def.pipeline {
+        items
+            .iter()
+            .map(crate::config::role::parse_pipeline_node)
+            .collect::<Result<Vec<_>>>()
+            .context("Failed to parse `pipeline:` node list")
+    } else {
+        Ok(def
+            .stages
+            .into_iter()
+            .map(|s| {
+                PipelineNode::Stage(RolePipelineStage {
+                    role: s.role,
+                    model: s.model,
+                })
+            })
+            .collect())
+    }
 }
 
 /// Run a pipeline defined in a role's frontmatter. Called from tool dispatch.
 /// Returns the final output text.
 pub async fn run_pipeline_role(
     config: &GlobalConfig,
-    stages: &[RolePipelineStage],
+    nodes: &[PipelineNode],
     input_text: &str,
 ) -> Result<String> {
-    if stages.is_empty() {
+    if nodes.is_empty() {
         bail!("Pipeline role has no stages");
     }
 
-    let pipeline_stages: Vec<PipelineStage> = stages
-        .iter()
-        .map(|s| PipelineStage {
-            role_name: s.role.clone(),
-            model_id: s.model.clone(),
-        })
-        .collect();
+    // Phase 21D: structural + reachability checks before any LLM call.
+    crate::config::preflight::validate_pipeline_dag_structure(nodes)
+        .context("Pipeline DAG validation failed")?;
 
     let abort_signal = create_abort_signal();
-    let stage_count = pipeline_stages.len();
+    let node_count = nodes.len();
     let mut current_input = input_text.to_string();
 
-    for (i, stage) in pipeline_stages.iter().enumerate() {
-        let (output, _metrics) = run_stage(
+    for (i, node) in nodes.iter().enumerate() {
+        // Pipeline-as-tool: never print output, the caller consumes it.
+        let (output, _traces) = run_node(
             config,
-            stage,
+            node,
             i,
-            stage_count,
+            node_count,
             &current_input,
-            // For pipeline-as-tool, never print output (it's returned to the caller)
             false,
+            None,
             abort_signal.clone(),
         )
         .await?;
@@ -570,4 +617,253 @@ pub async fn run_pipeline_role(
     }
 
     Ok(current_input)
+}
+
+/// Phase 21: recursively execute a pipeline DAG node and return its
+/// produced text plus the flat list of leaf-stage traces it generated.
+///
+/// `branch_label` is `Some(n)` only when we're inside a fan-out — it's
+/// stamped onto every trace produced by this subtree so the JSON envelope
+/// shows which branch each stage belongs to.
+fn run_node<'a>(
+    config: &'a GlobalConfig,
+    node: &'a PipelineNode,
+    node_index: usize,
+    node_count: usize,
+    input_text: &'a str,
+    is_last: bool,
+    branch_label: Option<usize>,
+    abort_signal: AbortSignal,
+) -> futures_util::future::BoxFuture<'a, Result<(String, Vec<StageTrace>)>> {
+    Box::pin(async move {
+        match node {
+            PipelineNode::Stage(s) => {
+                let stage = PipelineStage {
+                    role_name: s.role.clone(),
+                    model_id: s.model.clone(),
+                };
+                let (output, metrics) = run_stage(
+                    config,
+                    &stage,
+                    node_index,
+                    node_count,
+                    input_text,
+                    is_last,
+                    abort_signal,
+                )
+                .await?;
+                let trace = StageTrace {
+                    role: s.role.clone(),
+                    model: metrics.model_id.clone(),
+                    input_tokens: metrics.input_tokens,
+                    output_tokens: metrics.output_tokens,
+                    cost_usd: metrics.cost_usd,
+                    latency_ms: metrics.latency_ms,
+                    branch: branch_label,
+                };
+                Ok((output, vec![trace]))
+            }
+            PipelineNode::Parallel(p) => {
+                run_parallel(
+                    config,
+                    p,
+                    node_index,
+                    node_count,
+                    input_text,
+                    is_last,
+                    branch_label,
+                    abort_signal,
+                )
+                .await
+            }
+            PipelineNode::Switch(s) => {
+                run_switch(
+                    config,
+                    s,
+                    node_index,
+                    node_count,
+                    input_text,
+                    is_last,
+                    branch_label,
+                    abort_signal,
+                )
+                .await
+            }
+        }
+    })
+}
+
+/// Phase 21A/21C: fan out the same input across N branches, await all,
+/// then combine their outputs via the configured merge strategy.
+async fn run_parallel(
+    config: &GlobalConfig,
+    p: &ParallelNode,
+    node_index: usize,
+    node_count: usize,
+    input_text: &str,
+    is_last: bool,
+    branch_label: Option<usize>,
+    abort_signal: AbortSignal,
+) -> Result<(String, Vec<StageTrace>)> {
+    // Each branch sees the same input. We don't propagate `is_last=true`
+    // into branches: a branch's output is consumed by the merge, never
+    // printed directly. The merged output is what propagates downstream.
+    let branch_count = p.branches.len();
+    let futs = p.branches.iter().enumerate().map(|(bi, branch)| {
+        let stamp = match branch_label {
+            // Preserve the outermost branch label for nested fans.
+            Some(outer) => Some(outer),
+            None => Some(bi + 1),
+        };
+        run_node(
+            config,
+            branch,
+            node_index,
+            node_count,
+            input_text,
+            false,
+            stamp,
+            abort_signal.clone(),
+        )
+    });
+    let results: Vec<Result<(String, Vec<StageTrace>)>> = join_all(futs).await;
+
+    let mut outputs: Vec<String> = Vec::with_capacity(branch_count);
+    let mut traces: Vec<StageTrace> = Vec::new();
+    for r in results {
+        let (out, mut t) = r?;
+        outputs.push(out);
+        traces.append(&mut t);
+    }
+
+    let merged = match &p.merge {
+        MergeStrategy::Concatenate => outputs.join("\n---\n"),
+        MergeStrategy::JsonArray => {
+            // Try to preserve each branch output's native JSON shape;
+            // fall back to a string element when the branch produced
+            // non-JSON text.
+            let arr: Vec<serde_json::Value> = outputs
+                .iter()
+                .map(|s| {
+                    serde_json::from_str::<serde_json::Value>(s)
+                        .unwrap_or_else(|_| serde_json::Value::String(s.clone()))
+                })
+                .collect();
+            serde_json::to_string(&arr).context("Failed to serialize json_array merge")?
+        }
+        MergeStrategy::CustomRole(role_name) => {
+            let stage = PipelineStage {
+                role_name: role_name.clone(),
+                model_id: None,
+            };
+            let concatenated = outputs.join("\n---\n");
+            let (out, metrics) = run_stage(
+                config,
+                &stage,
+                node_index,
+                node_count,
+                &concatenated,
+                is_last,
+                abort_signal,
+            )
+            .await?;
+            traces.push(StageTrace {
+                role: role_name.clone(),
+                model: metrics.model_id.clone(),
+                input_tokens: metrics.input_tokens,
+                output_tokens: metrics.output_tokens,
+                cost_usd: metrics.cost_usd,
+                latency_ms: metrics.latency_ms,
+                branch: branch_label,
+            });
+            return Ok((out, traces));
+        }
+    };
+
+    // For built-in merges (concatenate / json_array), the parallel node
+    // itself doesn't run an extra stage. If this node is the last in the
+    // top-level pipeline and we're printing, emit the merged output here.
+    if is_last {
+        print_final_output(config, &merged)?;
+    }
+
+    Ok((merged, traces))
+}
+
+/// Phase 21B: pick the first branch whose `when:` predicate matches the
+/// prior output (or the `otherwise:` fallback) and execute it.
+async fn run_switch(
+    config: &GlobalConfig,
+    s: &SwitchNode,
+    node_index: usize,
+    node_count: usize,
+    input_text: &str,
+    is_last: bool,
+    branch_label: Option<usize>,
+    abort_signal: AbortSignal,
+) -> Result<(String, Vec<StageTrace>)> {
+    let mut chosen: Option<&PipelineNode> = None;
+    for b in &s.branches {
+        match &b.predicate {
+            Some(p) => {
+                if p.evaluate(input_text) {
+                    chosen = Some(&b.node);
+                    break;
+                }
+            }
+            None => {
+                // Defer the `otherwise:` until after all `when:` branches
+                // failed — guaranteed by parse order since `otherwise:`
+                // can appear anywhere but only matches when no `when:`
+                // does. The loop continues; if a later `when:` matches,
+                // it still wins.
+            }
+        }
+    }
+    if chosen.is_none() {
+        chosen = s
+            .branches
+            .iter()
+            .find(|b| b.predicate.is_none())
+            .map(|b| b.node.as_ref());
+    }
+
+    let node = chosen.ok_or_else(|| {
+        anyhow::anyhow!(
+            "Switch routed no branch: no `when:` matched and no `otherwise:` defined"
+        )
+    })?;
+
+    run_node(
+        config,
+        node,
+        node_index,
+        node_count,
+        input_text,
+        is_last,
+        branch_label,
+        abort_signal,
+    )
+    .await
+}
+
+/// Phase 21: print the final pipeline output when a fan-out lands on the
+/// last position of the top-level pipeline. Mirrors the printing block in
+/// `run_stage_inner` for sequential stages.
+fn print_final_output(config: &GlobalConfig, output: &str) -> Result<()> {
+    let final_output = if let Some(fmt) = config.read().output_format {
+        if fmt.is_structured() {
+            fmt.clean_output(output)?
+        } else {
+            output.to_string()
+        }
+    } else {
+        output.to_string()
+    };
+    print!("{final_output}");
+    std::io::Write::flush(&mut std::io::stdout())?;
+    if !final_output.ends_with('\n') {
+        println!();
+    }
+    Ok(())
 }

@@ -154,7 +154,7 @@ pub struct Role {
     #[serde(skip_serializing_if = "Option::is_none")]
     examples: Option<Vec<RoleExample>>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pipeline: Option<Vec<RolePipelineStage>>,
+    pipeline: Option<Vec<PipelineNode>>,
 
     // Phase 6B: Lifecycle hooks
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -230,6 +230,571 @@ pub struct RolePipelineStage {
     pub role: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub model: Option<String>,
+}
+
+// Phase 21: DAG primitives — a pipeline is a list of `PipelineNode`s. The
+// existing sequential stage is the `Stage` variant; `Parallel` is fan-out;
+// `Switch` is conditional routing.
+#[derive(Debug, Clone)]
+pub enum PipelineNode {
+    Stage(RolePipelineStage),
+    Parallel(ParallelNode),
+    Switch(SwitchNode),
+}
+
+#[derive(Debug, Clone)]
+pub struct ParallelNode {
+    pub branches: Vec<PipelineNode>,
+    pub merge: MergeStrategy,
+}
+
+#[derive(Debug, Clone)]
+pub enum MergeStrategy {
+    /// Join outputs with `\n---\n` separator.
+    Concatenate,
+    /// Wrap outputs in a JSON array.
+    JsonArray,
+    /// Pipe the concatenated outputs through a merge role.
+    CustomRole(String),
+}
+
+impl Default for MergeStrategy {
+    fn default() -> Self {
+        MergeStrategy::Concatenate
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct SwitchNode {
+    pub branches: Vec<SwitchBranch>,
+}
+
+#[derive(Debug, Clone)]
+pub struct SwitchBranch {
+    /// `None` means the branch is the `otherwise:` fallback.
+    pub predicate: Option<Predicate>,
+    pub node: Box<PipelineNode>,
+}
+
+/// Deterministic predicate evaluated against the previous stage's output.
+/// All checks are zero-token: parse output as JSON, walk `output_field`
+/// (dotted path), compare. If output is not JSON or the field is missing,
+/// the predicate fails (does not match).
+#[derive(Debug, Clone, Default)]
+pub struct Predicate {
+    /// Dotted JSON path (e.g. `"category"` or `"meta.kind"`). When `None`,
+    /// the comparison runs against the raw text output (the whole previous
+    /// stage's body).
+    pub output_field: Option<String>,
+    pub equals: Option<serde_json::Value>,
+    pub contains: Option<String>,
+    pub gt: Option<f64>,
+    pub lt: Option<f64>,
+}
+
+impl Predicate {
+    /// Evaluate this predicate against the raw text output of the prior stage.
+    /// Returns `true` when all configured conditions match.
+    pub fn evaluate(&self, prior_output: &str) -> bool {
+        // Resolve the value to compare against.
+        let target: serde_json::Value = if let Some(field) = &self.output_field {
+            let json: serde_json::Value = match serde_json::from_str(prior_output) {
+                Ok(v) => v,
+                Err(_) => return false,
+            };
+            match lookup_dotted_path(&json, field) {
+                Some(v) => v.clone(),
+                None => return false,
+            }
+        } else {
+            serde_json::Value::String(prior_output.to_string())
+        };
+
+        if let Some(eq) = &self.equals {
+            if !value_equals(&target, eq) {
+                return false;
+            }
+        }
+        if let Some(needle) = &self.contains {
+            let haystack = match &target {
+                serde_json::Value::String(s) => s.clone(),
+                other => other.to_string(),
+            };
+            if !haystack.contains(needle) {
+                return false;
+            }
+        }
+        if let Some(threshold) = self.gt {
+            let n = match value_as_f64(&target) {
+                Some(n) => n,
+                None => return false,
+            };
+            if !(n > threshold) {
+                return false;
+            }
+        }
+        if let Some(threshold) = self.lt {
+            let n = match value_as_f64(&target) {
+                Some(n) => n,
+                None => return false,
+            };
+            if !(n < threshold) {
+                return false;
+            }
+        }
+        // A predicate with no clauses set is treated as "always true". This is
+        // mostly defensive — parsing rejects empty predicates and produces an
+        // explicit `otherwise:` branch instead.
+        true
+    }
+}
+
+fn lookup_dotted_path<'a>(
+    json: &'a serde_json::Value,
+    path: &str,
+) -> Option<&'a serde_json::Value> {
+    let mut cur = json;
+    for segment in path.split('.') {
+        if segment.is_empty() {
+            return None;
+        }
+        cur = match cur {
+            serde_json::Value::Object(map) => map.get(segment)?,
+            _ => return None,
+        };
+    }
+    Some(cur)
+}
+
+fn value_as_f64(v: &serde_json::Value) -> Option<f64> {
+    match v {
+        serde_json::Value::Number(n) => n.as_f64(),
+        serde_json::Value::String(s) => s.parse::<f64>().ok(),
+        _ => None,
+    }
+}
+
+fn value_equals(a: &serde_json::Value, b: &serde_json::Value) -> bool {
+    // Allow loose equality across string/number: `"category": "bug"` should
+    // match both `equals: "bug"` and `equals: bug` (YAML often unquotes).
+    if a == b {
+        return true;
+    }
+    if let (serde_json::Value::String(s), other) | (other, serde_json::Value::String(s)) =
+        (a, b)
+    {
+        if let Some(n) = value_as_f64(other) {
+            if let Ok(parsed) = s.parse::<f64>() {
+                return (parsed - n).abs() < f64::EPSILON;
+            }
+        }
+        // Bool stringification — "true" == true, "false" == false
+        if let serde_json::Value::Bool(b) = other {
+            return s.eq_ignore_ascii_case(if *b { "true" } else { "false" });
+        }
+    }
+    false
+}
+
+/// Parse a single pipeline-node JSON value (originally YAML). The dispatch
+/// is map-key based: `parallel:` → Parallel, `switch:` → Switch, otherwise
+/// treat as a leaf Stage (`role:` + optional `model:`).
+pub fn parse_pipeline_node(value: &serde_json::Value) -> Result<PipelineNode> {
+    let map = value
+        .as_object()
+        .ok_or_else(|| anyhow!("Pipeline node must be a YAML mapping, got: {value}"))?;
+
+    if let Some(parallel) = map.get("parallel") {
+        let arr = parallel
+            .as_array()
+            .ok_or_else(|| anyhow!("`parallel:` must be a list of nodes"))?;
+        if arr.is_empty() {
+            bail!("`parallel:` requires at least one branch");
+        }
+        let branches: Result<Vec<PipelineNode>> =
+            arr.iter().map(parse_pipeline_node).collect();
+        let branches = branches?;
+        let merge = match map.get("merge") {
+            None => MergeStrategy::default(),
+            Some(serde_json::Value::String(s)) => match s.as_str() {
+                "concatenate" => MergeStrategy::Concatenate,
+                "json_array" => MergeStrategy::JsonArray,
+                other => bail!(
+                    "Unknown merge strategy '{other}'. Use 'concatenate', \
+                     'json_array', or a mapping with `custom_role:`"
+                ),
+            },
+            Some(serde_json::Value::Object(o)) => {
+                let role = o
+                    .get("custom_role")
+                    .and_then(|v| v.as_str())
+                    .ok_or_else(|| {
+                        anyhow!("merge mapping requires `custom_role: <role-name>`")
+                    })?;
+                MergeStrategy::CustomRole(role.to_string())
+            }
+            Some(other) => bail!("Invalid `merge:` value: {other}"),
+        };
+        return Ok(PipelineNode::Parallel(ParallelNode { branches, merge }));
+    }
+
+    if let Some(switch) = map.get("switch") {
+        let arr = switch
+            .as_array()
+            .ok_or_else(|| anyhow!("`switch:` must be a list of conditional branches"))?;
+        if arr.is_empty() {
+            bail!("`switch:` requires at least one branch");
+        }
+        let mut branches: Vec<SwitchBranch> = Vec::with_capacity(arr.len());
+        let mut seen_otherwise = false;
+        for (idx, raw) in arr.iter().enumerate() {
+            let m = raw.as_object().ok_or_else(|| {
+                anyhow!("switch branch {} must be a mapping", idx + 1)
+            })?;
+            let has_otherwise = m.contains_key("otherwise");
+            let has_when = m.contains_key("when");
+            if has_otherwise && has_when {
+                bail!(
+                    "switch branch {} mixes `when:` and `otherwise:` — pick one",
+                    idx + 1
+                );
+            }
+            if !has_otherwise && !has_when {
+                bail!(
+                    "switch branch {} requires either `when:` or `otherwise:`",
+                    idx + 1
+                );
+            }
+            if has_otherwise {
+                if seen_otherwise {
+                    bail!("switch has more than one `otherwise:` branch");
+                }
+                seen_otherwise = true;
+            }
+
+            let predicate = if has_when {
+                Some(parse_predicate(&m["when"]).with_context(|| {
+                    format!("switch branch {} has invalid `when:` predicate", idx + 1)
+                })?)
+            } else {
+                None
+            };
+
+            // Extract the body. If the branch carries a `role:`/`parallel:`/
+            // `switch:` sibling, that is the body. Otherwise, if `otherwise:`
+            // is itself a mapping describing a node, use that.
+            let body = build_branch_body(m).with_context(|| {
+                format!("switch branch {} has no executable body", idx + 1)
+            })?;
+            branches.push(SwitchBranch {
+                predicate,
+                node: Box::new(body),
+            });
+        }
+        return Ok(PipelineNode::Switch(SwitchNode { branches }));
+    }
+
+    // Leaf stage — must have `role:`.
+    let stage: RolePipelineStage = serde_json::from_value(value.clone())
+        .with_context(|| format!("Invalid pipeline stage: {value}"))?;
+    if stage.role.trim().is_empty() {
+        bail!("Pipeline stage requires a non-empty `role:`");
+    }
+    Ok(PipelineNode::Stage(stage))
+}
+
+fn build_branch_body(
+    m: &serde_json::Map<String, serde_json::Value>,
+) -> Result<PipelineNode> {
+    // Prefer a sibling `role:`/`parallel:`/`switch:` at the same level as
+    // the predicate. This is the natural YAML shape and matches the design
+    // doc samples.
+    let mut body_map = serde_json::Map::new();
+    let mut has_body = false;
+    for key in ["role", "model", "parallel", "merge", "switch"] {
+        if let Some(v) = m.get(key) {
+            body_map.insert(key.to_string(), v.clone());
+            if key != "model" && key != "merge" {
+                has_body = true;
+            }
+        }
+    }
+    if has_body {
+        return parse_pipeline_node(&serde_json::Value::Object(body_map));
+    }
+    // Fall back to a body nested under `otherwise:` (e.g.
+    // `otherwise: { role: general-review }`).
+    if let Some(serde_json::Value::Object(_)) = m.get("otherwise") {
+        return parse_pipeline_node(&m["otherwise"]);
+    }
+    bail!("branch must specify `role:`, `parallel:`, or `switch:`")
+}
+
+fn parse_predicate(value: &serde_json::Value) -> Result<Predicate> {
+    let map = value
+        .as_object()
+        .ok_or_else(|| anyhow!("`when:` must be a mapping"))?;
+    let mut p = Predicate::default();
+    let mut any = false;
+    for (k, v) in map {
+        match k.as_str() {
+            "output_field" => {
+                let s = v
+                    .as_str()
+                    .ok_or_else(|| anyhow!("`output_field` must be a string"))?;
+                p.output_field = Some(s.to_string());
+            }
+            "equals" => {
+                p.equals = Some(v.clone());
+                any = true;
+            }
+            "contains" => {
+                let s = v
+                    .as_str()
+                    .ok_or_else(|| anyhow!("`contains` must be a string"))?;
+                p.contains = Some(s.to_string());
+                any = true;
+            }
+            "gt" => {
+                let n = value_as_f64(v)
+                    .ok_or_else(|| anyhow!("`gt` must be a number"))?;
+                p.gt = Some(n);
+                any = true;
+            }
+            "lt" => {
+                let n = value_as_f64(v)
+                    .ok_or_else(|| anyhow!("`lt` must be a number"))?;
+                p.lt = Some(n);
+                any = true;
+            }
+            other => bail!("Unknown predicate key '{other}'"),
+        }
+    }
+    if !any {
+        bail!("Predicate requires at least one of: equals, contains, gt, lt");
+    }
+    Ok(p)
+}
+
+impl PipelineNode {
+    /// Collect every leaf `Stage` reachable from this node. Used for
+    /// preflight validation that doesn't need to honor routing — every
+    /// declared role must exist.
+    pub fn all_stages(&self) -> Vec<&RolePipelineStage> {
+        let mut out = Vec::new();
+        self.collect_stages(&mut out);
+        out
+    }
+
+    fn collect_stages<'a>(&'a self, out: &mut Vec<&'a RolePipelineStage>) {
+        match self {
+            PipelineNode::Stage(s) => out.push(s),
+            PipelineNode::Parallel(p) => {
+                for b in &p.branches {
+                    b.collect_stages(out);
+                }
+                if let MergeStrategy::CustomRole(_) = p.merge {
+                    // The custom-role merger is a stage too; we synthesize a
+                    // stub here so preflight can validate its existence
+                    // without owning the RolePipelineStage memory.
+                    // (See PipelineNode::merge_role_names for the actual
+                    // collection path used by preflight.)
+                }
+            }
+            PipelineNode::Switch(s) => {
+                for b in &s.branches {
+                    b.node.collect_stages(out);
+                }
+            }
+        }
+    }
+
+    /// Collect every custom-role merger name reachable from this node.
+    /// Preflight checks these as well — a missing merge role is a
+    /// declarative error, even if no branch fans out at runtime.
+    pub fn merge_role_names(&self) -> Vec<String> {
+        let mut out = Vec::new();
+        self.collect_merge_roles(&mut out);
+        out
+    }
+
+    fn collect_merge_roles(&self, out: &mut Vec<String>) {
+        match self {
+            PipelineNode::Stage(_) => {}
+            PipelineNode::Parallel(p) => {
+                if let MergeStrategy::CustomRole(name) = &p.merge {
+                    out.push(name.clone());
+                }
+                for b in &p.branches {
+                    b.collect_merge_roles(out);
+                }
+            }
+            PipelineNode::Switch(s) => {
+                for b in &s.branches {
+                    b.node.collect_merge_roles(out);
+                }
+            }
+        }
+    }
+
+    /// Phase 21D: shallow structural validation — every parallel/switch must
+    /// have at least one branch, every switch must have at most one
+    /// `otherwise:`, etc. Parser guarantees most of this; this is a defense
+    /// for nodes constructed programmatically.
+    pub fn structural_check(&self) -> Result<()> {
+        match self {
+            PipelineNode::Stage(s) => {
+                if s.role.trim().is_empty() {
+                    bail!("Stage has empty role name");
+                }
+            }
+            PipelineNode::Parallel(p) => {
+                if p.branches.is_empty() {
+                    bail!("Parallel node has no branches");
+                }
+                for b in &p.branches {
+                    b.structural_check()?;
+                }
+            }
+            PipelineNode::Switch(s) => {
+                if s.branches.is_empty() {
+                    bail!("Switch node has no branches");
+                }
+                let mut otherwise_count = 0;
+                for b in &s.branches {
+                    if b.predicate.is_none() {
+                        otherwise_count += 1;
+                    }
+                    b.node.structural_check()?;
+                }
+                if otherwise_count > 1 {
+                    bail!("Switch node has more than one `otherwise:` branch");
+                }
+            }
+        }
+        Ok(())
+    }
+}
+
+// Serde plumbing for PipelineNode: we use the structural parser above for
+// deserialization (so YAML errors are friendlier) and round-trip to a
+// minimal JSON shape for serialization. Round-tripping isn't a primary use
+// case — pipelines live in source YAML — but `Role::export()` calls
+// serde_json::json! on the field, so a Serialize impl keeps that path
+// working.
+impl<'de> serde::Deserialize<'de> for PipelineNode {
+    fn deserialize<D>(deserializer: D) -> std::result::Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let v = serde_json::Value::deserialize(deserializer)?;
+        parse_pipeline_node(&v).map_err(serde::de::Error::custom)
+    }
+}
+
+impl serde::Serialize for PipelineNode {
+    fn serialize<S>(&self, serializer: S) -> std::result::Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        match self {
+            PipelineNode::Stage(s) => s.serialize(serializer),
+            PipelineNode::Parallel(p) => {
+                use serde::ser::SerializeMap;
+                let mut m = serializer.serialize_map(Some(2))?;
+                m.serialize_entry("parallel", &p.branches)?;
+                match &p.merge {
+                    MergeStrategy::Concatenate => {
+                        m.serialize_entry("merge", "concatenate")?
+                    }
+                    MergeStrategy::JsonArray => {
+                        m.serialize_entry("merge", "json_array")?
+                    }
+                    MergeStrategy::CustomRole(name) => {
+                        let mut o = serde_json::Map::new();
+                        o.insert(
+                            "custom_role".into(),
+                            serde_json::Value::String(name.clone()),
+                        );
+                        m.serialize_entry("merge", &o)?;
+                    }
+                }
+                m.end()
+            }
+            PipelineNode::Switch(s) => {
+                use serde::ser::SerializeMap;
+                let mut m = serializer.serialize_map(Some(1))?;
+                let arr: Vec<serde_json::Value> = s
+                    .branches
+                    .iter()
+                    .map(|b| {
+                        let mut o = serde_json::Map::new();
+                        match &b.predicate {
+                            Some(p) => {
+                                let mut wp = serde_json::Map::new();
+                                if let Some(f) = &p.output_field {
+                                    wp.insert(
+                                        "output_field".into(),
+                                        serde_json::Value::String(f.clone()),
+                                    );
+                                }
+                                if let Some(eq) = &p.equals {
+                                    wp.insert("equals".into(), eq.clone());
+                                }
+                                if let Some(c) = &p.contains {
+                                    wp.insert(
+                                        "contains".into(),
+                                        serde_json::Value::String(c.clone()),
+                                    );
+                                }
+                                if let Some(g) = p.gt {
+                                    wp.insert(
+                                        "gt".into(),
+                                        serde_json::Value::Number(
+                                            serde_json::Number::from_f64(g).unwrap_or_else(
+                                                || serde_json::Number::from(0),
+                                            ),
+                                        ),
+                                    );
+                                }
+                                if let Some(l) = p.lt {
+                                    wp.insert(
+                                        "lt".into(),
+                                        serde_json::Value::Number(
+                                            serde_json::Number::from_f64(l).unwrap_or_else(
+                                                || serde_json::Number::from(0),
+                                            ),
+                                        ),
+                                    );
+                                }
+                                o.insert(
+                                    "when".into(),
+                                    serde_json::Value::Object(wp),
+                                );
+                            }
+                            None => {
+                                o.insert(
+                                    "otherwise".into(),
+                                    serde_json::Value::Bool(true),
+                                );
+                            }
+                        }
+                        // Inline the body so the YAML matches the design.
+                        if let Ok(body) = serde_json::to_value(b.node.as_ref()) {
+                            if let serde_json::Value::Object(body_map) = body {
+                                for (k, v) in body_map {
+                                    o.insert(k, v);
+                                }
+                            }
+                        }
+                        serde_json::Value::Object(o)
+                    })
+                    .collect();
+                m.serialize_entry("switch", &arr)?;
+                m.end()
+            }
+        }
+    }
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -552,10 +1117,10 @@ impl Role {
                                     if let Some(arr) = value.as_array() {
                                         role.pipeline = Some(
                                             arr.iter()
-                                                .filter_map(|v| match serde_json::from_value::<RolePipelineStage>(v.clone()) {
-                                                    Ok(stage) => Some(stage),
+                                                .filter_map(|v| match parse_pipeline_node(v) {
+                                                    Ok(node) => Some(node),
                                                     Err(e) => {
-                                                        warn!("Skipping invalid pipeline stage in role '{}': {e}", name);
+                                                        warn!("Skipping invalid pipeline node in role '{}': {e}", name);
                                                         None
                                                     }
                                                 })
@@ -904,12 +1469,73 @@ impl Role {
         self.examples.as_deref()
     }
 
-    pub fn pipeline(&self) -> Option<&[RolePipelineStage]> {
+    /// Phase 21: returns the full DAG node list. Sequential stages, fan-out
+    /// (`Parallel`), and conditional routing (`Switch`) all live here.
+    pub fn pipeline(&self) -> Option<&[PipelineNode]> {
         self.pipeline.as_deref()
+    }
+
+    /// Backward-compatible view: returns the leaf stage list when the
+    /// pipeline is purely sequential (every top-level node is a `Stage`).
+    /// For DAG pipelines, returns `None` — callers that need a flat list
+    /// should use `pipeline_all_stages()` instead, which walks the tree.
+    pub fn pipeline_sequential(&self) -> Option<Vec<RolePipelineStage>> {
+        let nodes = self.pipeline.as_ref()?;
+        let mut out = Vec::with_capacity(nodes.len());
+        for n in nodes {
+            match n {
+                PipelineNode::Stage(s) => out.push(s.clone()),
+                _ => return None,
+            }
+        }
+        Some(out)
+    }
+
+    /// Phase 21: every leaf stage reachable from the pipeline, including
+    /// stages inside parallel branches and switch arms. Used for preflight
+    /// validation — `validate_pipeline_stages` checks each one exists.
+    pub fn pipeline_all_stages(&self) -> Vec<RolePipelineStage> {
+        let nodes = match &self.pipeline {
+            Some(n) => n,
+            None => return Vec::new(),
+        };
+        let mut out = Vec::new();
+        for n in nodes {
+            for s in n.all_stages() {
+                out.push(s.clone());
+            }
+        }
+        out
+    }
+
+    /// Phase 21: custom-role merger names reachable from any parallel node.
+    pub fn pipeline_merge_roles(&self) -> Vec<String> {
+        let nodes = match &self.pipeline {
+            Some(n) => n,
+            None => return Vec::new(),
+        };
+        let mut out = Vec::new();
+        for n in nodes {
+            for name in n.merge_role_names() {
+                out.push(name);
+            }
+        }
+        out
     }
 
     pub fn is_pipeline(&self) -> bool {
         self.pipeline.as_ref().is_some_and(|p| !p.is_empty())
+    }
+
+    /// Phase 21: true iff the pipeline contains any DAG primitive
+    /// (`parallel:` or `switch:`). Purely sequential pipelines return false.
+    pub fn pipeline_has_dag(&self) -> bool {
+        match &self.pipeline {
+            Some(nodes) => nodes
+                .iter()
+                .any(|n| !matches!(n, PipelineNode::Stage(_))),
+            None => false,
+        }
     }
 
     pub fn pipe_to(&self) -> Option<&str> {
@@ -2707,5 +3333,328 @@ Prompt."#;
         let exported = role.export();
         let round = Role::new("roundtrip", &exported);
         assert_eq!(round.schema_retries(), Some(2));
+    }
+
+    // ----- Phase 21: DAG primitives -----
+
+    fn yaml_to_node(yaml: &str) -> Result<PipelineNode> {
+        let v: serde_json::Value = serde_yaml::from_str(yaml)?;
+        parse_pipeline_node(&v)
+    }
+
+    #[test]
+    fn pipeline_node_sequential_stage_parses() {
+        let node = yaml_to_node("role: summarize\nmodel: claude-haiku").unwrap();
+        match node {
+            PipelineNode::Stage(s) => {
+                assert_eq!(s.role, "summarize");
+                assert_eq!(s.model.as_deref(), Some("claude-haiku"));
+            }
+            _ => panic!("expected Stage"),
+        }
+    }
+
+    #[test]
+    fn pipeline_node_parallel_parses_default_merge() {
+        let yaml = r#"
+parallel:
+  - role: security-review
+  - role: style-review
+"#;
+        let node = yaml_to_node(yaml).unwrap();
+        match node {
+            PipelineNode::Parallel(p) => {
+                assert_eq!(p.branches.len(), 2);
+                assert!(matches!(p.merge, MergeStrategy::Concatenate));
+            }
+            _ => panic!("expected Parallel"),
+        }
+    }
+
+    #[test]
+    fn pipeline_node_parallel_json_array_merge() {
+        let yaml = r#"
+parallel:
+  - role: a
+  - role: b
+merge: json_array
+"#;
+        let node = yaml_to_node(yaml).unwrap();
+        match node {
+            PipelineNode::Parallel(p) => {
+                assert!(matches!(p.merge, MergeStrategy::JsonArray));
+            }
+            _ => panic!("expected Parallel"),
+        }
+    }
+
+    #[test]
+    fn pipeline_node_parallel_custom_role_merge() {
+        let yaml = r#"
+parallel:
+  - role: a
+  - role: b
+merge:
+  custom_role: synthesize
+"#;
+        let node = yaml_to_node(yaml).unwrap();
+        match node {
+            PipelineNode::Parallel(p) => match p.merge {
+                MergeStrategy::CustomRole(r) => assert_eq!(r, "synthesize"),
+                _ => panic!("expected CustomRole"),
+            },
+            _ => panic!("expected Parallel"),
+        }
+    }
+
+    #[test]
+    fn pipeline_node_parallel_rejects_empty_branches() {
+        let yaml = r#"
+parallel: []
+"#;
+        let err = yaml_to_node(yaml).unwrap_err();
+        assert!(err.to_string().contains("at least one branch"));
+    }
+
+    #[test]
+    fn pipeline_node_parallel_rejects_unknown_merge() {
+        let yaml = r#"
+parallel:
+  - role: a
+merge: weird
+"#;
+        let err = yaml_to_node(yaml).unwrap_err();
+        assert!(err.to_string().contains("Unknown merge"));
+    }
+
+    #[test]
+    fn pipeline_node_switch_parses_when_and_otherwise() {
+        let yaml = r#"
+switch:
+  - when: { output_field: "category", equals: "bug" }
+    role: bug-triage
+  - when: { output_field: "category", equals: "feature" }
+    role: feature-review
+  - otherwise: true
+    role: general-review
+"#;
+        let node = yaml_to_node(yaml).unwrap();
+        match node {
+            PipelineNode::Switch(s) => {
+                assert_eq!(s.branches.len(), 3);
+                assert!(s.branches[0].predicate.is_some());
+                assert!(s.branches[2].predicate.is_none());
+                match s.branches[2].node.as_ref() {
+                    PipelineNode::Stage(stg) => {
+                        assert_eq!(stg.role, "general-review")
+                    }
+                    _ => panic!("expected Stage in otherwise"),
+                }
+            }
+            _ => panic!("expected Switch"),
+        }
+    }
+
+    #[test]
+    fn pipeline_node_switch_rejects_double_otherwise() {
+        let yaml = r#"
+switch:
+  - otherwise: true
+    role: a
+  - otherwise: true
+    role: b
+"#;
+        let err = yaml_to_node(yaml).unwrap_err();
+        assert!(err.to_string().contains("more than one `otherwise:`"));
+    }
+
+    #[test]
+    fn pipeline_node_switch_rejects_branch_with_no_predicate_or_otherwise() {
+        let yaml = r#"
+switch:
+  - role: lonely
+"#;
+        let err = yaml_to_node(yaml).unwrap_err();
+        assert!(err.to_string().contains("requires either `when:` or `otherwise:`"));
+    }
+
+    #[test]
+    fn pipeline_node_switch_rejects_when_with_no_body() {
+        let yaml = r#"
+switch:
+  - when: { contains: "foo" }
+"#;
+        let err = yaml_to_node(yaml).unwrap_err();
+        // anyhow chain: outer context names the branch, inner gives the rule.
+        let full = format!("{err:#}");
+        assert!(full.contains("has no executable body"));
+        assert!(full.contains("must specify `role:`, `parallel:`, or `switch:`"));
+    }
+
+    #[test]
+    fn pipeline_node_nested_parallel_inside_switch() {
+        let yaml = r#"
+switch:
+  - when: { output_field: "kind", equals: "deep" }
+    parallel:
+      - role: a
+      - role: b
+    merge: json_array
+  - otherwise: true
+    role: quick
+"#;
+        let node = yaml_to_node(yaml).unwrap();
+        match node {
+            PipelineNode::Switch(s) => match s.branches[0].node.as_ref() {
+                PipelineNode::Parallel(p) => {
+                    assert_eq!(p.branches.len(), 2);
+                    assert!(matches!(p.merge, MergeStrategy::JsonArray));
+                }
+                _ => panic!("expected Parallel inside Switch"),
+            },
+            _ => panic!("expected Switch"),
+        }
+    }
+
+    #[test]
+    fn predicate_equals_matches_text_output() {
+        let p = Predicate {
+            contains: Some("error".into()),
+            ..Default::default()
+        };
+        assert!(p.evaluate("there was an error in the build"));
+        assert!(!p.evaluate("all clean"));
+    }
+
+    #[test]
+    fn predicate_equals_on_json_field() {
+        let p = Predicate {
+            output_field: Some("category".into()),
+            equals: Some(serde_json::Value::String("bug".into())),
+            ..Default::default()
+        };
+        assert!(p.evaluate(r#"{"category": "bug", "id": 7}"#));
+        assert!(!p.evaluate(r#"{"category": "feature"}"#));
+        assert!(!p.evaluate("not json at all"));
+    }
+
+    #[test]
+    fn predicate_dotted_field() {
+        let p = Predicate {
+            output_field: Some("meta.kind".into()),
+            equals: Some(serde_json::Value::String("urgent".into())),
+            ..Default::default()
+        };
+        assert!(p.evaluate(r#"{"meta": {"kind": "urgent"}}"#));
+        assert!(!p.evaluate(r#"{"meta": {"kind": "low"}}"#));
+        assert!(!p.evaluate(r#"{"meta": "not-an-object"}"#));
+    }
+
+    #[test]
+    fn predicate_gt_lt_numeric() {
+        let p_gt = Predicate {
+            output_field: Some("score".into()),
+            gt: Some(0.5),
+            ..Default::default()
+        };
+        assert!(p_gt.evaluate(r#"{"score": 0.9}"#));
+        assert!(!p_gt.evaluate(r#"{"score": 0.1}"#));
+        let p_lt = Predicate {
+            output_field: Some("score".into()),
+            lt: Some(0.5),
+            ..Default::default()
+        };
+        assert!(p_lt.evaluate(r#"{"score": 0.1}"#));
+        assert!(!p_lt.evaluate(r#"{"score": 0.9}"#));
+    }
+
+    #[test]
+    fn predicate_loose_string_number_equality() {
+        // YAML often unquotes numbers — `equals: 1` and `equals: "1"`
+        // should both match a string "1" or number 1.
+        let p = Predicate {
+            output_field: Some("v".into()),
+            equals: Some(serde_json::Value::Number(serde_json::Number::from(1))),
+            ..Default::default()
+        };
+        assert!(p.evaluate(r#"{"v": 1}"#));
+        assert!(p.evaluate(r#"{"v": "1"}"#));
+        assert!(!p.evaluate(r#"{"v": 2}"#));
+    }
+
+    #[test]
+    fn role_frontmatter_parses_full_dag() {
+        let content = r#"---
+pipeline:
+  - role: extract
+  - parallel:
+      - role: security-review
+      - role: style-review
+    merge: concatenate
+  - role: synthesize
+---
+Body."#;
+        let role = Role::new("dag-role", content);
+        assert!(role.is_pipeline());
+        assert!(role.pipeline_has_dag());
+        let nodes = role.pipeline().unwrap();
+        assert_eq!(nodes.len(), 3);
+        assert!(matches!(nodes[1], PipelineNode::Parallel(_)));
+        // pipeline_all_stages walks into branches.
+        let all = role.pipeline_all_stages();
+        let names: Vec<String> = all.iter().map(|s| s.role.clone()).collect();
+        assert_eq!(
+            names,
+            vec!["extract", "security-review", "style-review", "synthesize"]
+        );
+        // Sequential view bails on DAG.
+        assert!(role.pipeline_sequential().is_none());
+    }
+
+    #[test]
+    fn role_frontmatter_parses_pure_sequential_via_new_path() {
+        // Sequential pipelines still appear in pipeline_sequential.
+        let content = r#"---
+pipeline:
+  - role: a
+  - role: b
+    model: claude-haiku
+---
+Body."#;
+        let role = Role::new("seq", content);
+        assert!(!role.pipeline_has_dag());
+        let seq = role.pipeline_sequential().unwrap();
+        assert_eq!(seq.len(), 2);
+        assert_eq!(seq[1].model.as_deref(), Some("claude-haiku"));
+    }
+
+    #[test]
+    fn structural_check_rejects_empty_stage_role() {
+        let node = PipelineNode::Stage(RolePipelineStage {
+            role: " ".into(),
+            model: None,
+        });
+        let err = node.structural_check().unwrap_err();
+        assert!(err.to_string().contains("empty role"));
+    }
+
+    #[test]
+    fn pipeline_merge_roles_collected_recursively() {
+        let yaml = r#"
+parallel:
+  - role: a
+  - parallel:
+      - role: b
+      - role: c
+    merge:
+      custom_role: inner-merge
+merge:
+  custom_role: outer-merge
+"#;
+        let node = yaml_to_node(yaml).unwrap();
+        let mergers = node.merge_role_names();
+        assert!(mergers.contains(&"inner-merge".to_string()));
+        assert!(mergers.contains(&"outer-merge".to_string()));
+        assert_eq!(mergers.len(), 2);
     }
 }

@@ -1,7 +1,7 @@
 # AIChat Roadmap
 
-**Last updated:** 2026-05-04
-**666 tests passing (459 unit + 197 compatibility + 10 phase-14/12 regression), 0 failures**
+**Last updated:** 2026-05-11
+**689 tests passing (482 unit + 197 compatibility + 10 phase-14/12 regression), 0 failures**
 
 ---
 
@@ -29,7 +29,7 @@ Roles are the fundamental unit of composition. This roadmap evolves roles from s
 | 4 | Typed Ports & Capabilities | 14-15 | Phase 14 **Done**; Phase 15 planned | [epic-4.md](./analysis/epic-4.md) |
 | 5 | Server Pipeline Engine | 16-18 | **Deferred 2026-04-17** | [epic-5.md](./analysis/epic-5.md) |
 | 6 | Universal Addressing | 19-20 | Phase 19 **Done**; Phase 20 blocked on Epic 5 Phase 17B | [epic-6.md](./analysis/epic-6.md) |
-| 7 | DAG Execution | 21-22 | Planned | [epic-7.md](./analysis/epic-7.md) |
+| 7 | DAG Execution | 21-22 | Phase 21 **Done**; Phase 22 planned | [epic-7.md](./analysis/epic-7.md) |
 | 8 | Feedback Loop | 23-24 | Planned | [epic-8.md](./analysis/epic-8.md) |
 | 9 | Knowledge Evolution | 25-27 | **Done** | [epic-9.md](./analysis/epic-9.md) |
 | 10 | Entity Evolution | 28-29 | Planned | [epic-10.md](./analysis/epic-10.md) |

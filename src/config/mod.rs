@@ -13,8 +13,9 @@ pub use self::resolver::{
 pub use self::input::Input;
 pub use self::role::{
     run_lifecycle_hooks, validate_schema, validate_schema_detailed, validate_schema_traced,
-    KnowledgeBinding, Role, RoleExample, RoleLike, RolePipelineStage, CODE_ROLE,
-    CREATE_TITLE_ROLE, EXPLAIN_SHELL_ROLE, SHELL_ROLE,
+    KnowledgeBinding, MergeStrategy, ParallelNode, PipelineNode, Predicate, Role, RoleExample,
+    RoleLike, RolePipelineStage, SwitchBranch, SwitchNode, CODE_ROLE, CREATE_TITLE_ROLE,
+    EXPLAIN_SHELL_ROLE, SHELL_ROLE,
 };
 pub use self::prompt::Prompt;
 use self::session::Session;

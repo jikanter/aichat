@@ -412,7 +412,7 @@ impl ToolCall {
     fn check_pipeline_role(
         &self,
         config: &GlobalConfig,
-    ) -> Option<Vec<crate::config::RolePipelineStage>> {
+    ) -> Option<Vec<crate::config::PipelineNode>> {
         // Don't check if it's already a known function
         if config.read().functions.contains(&self.name) {
             return None;
@@ -430,7 +430,7 @@ impl ToolCall {
     async fn eval_pipeline_role(
         &self,
         config: &GlobalConfig,
-        stages: &[crate::config::RolePipelineStage],
+        nodes: &[crate::config::PipelineNode],
     ) -> Result<Value> {
         let input_text = self
             .arguments
@@ -447,8 +447,16 @@ impl ToolCall {
             println!("{}", dimmed_text(&format!("Call pipeline {}", self.name)));
         }
 
+        // Phase 21D: detect self-references and transitive pipeline cycles
+        // before triggering the (potentially expensive) tool dispatch.
+        crate::config::preflight::validate_pipeline_dag_cycles(
+            &config.read(),
+            &self.name,
+            nodes,
+        )?;
+
         let result =
-            crate::pipe::run_pipeline_role(config, stages, &input_text).await?;
+            crate::pipe::run_pipeline_role(config, nodes, &input_text).await?;
 
         Ok(json!({"output": result}))
     }
