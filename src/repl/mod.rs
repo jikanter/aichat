@@ -824,9 +824,10 @@ fn print_role_composition_summary(role: &crate::config::Role) {
     if in_summary != "any" || out_summary != "text" {
         parts.push(format!("in: {in_summary}, out: {out_summary}"));
     }
-    if let Some(stages) = role.pipeline() {
-        if !stages.is_empty() {
-            parts.push(format!("pipeline: {} stages", stages.len()));
+    if let Some(nodes) = role.pipeline() {
+        if !nodes.is_empty() {
+            let label = if role.pipeline_has_dag() { "nodes" } else { "stages" };
+            parts.push(format!("pipeline: {} {label}", nodes.len()));
         }
     }
     if !parts.is_empty() {

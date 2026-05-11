@@ -1,6 +1,7 @@
 #!/usr/bin/env bats
 
 PROMPTS_DIR="${AICHAT_PROMPTS_DIR:-$HOME/Library/Application Support/aichat/prompts}"
+AICHAT_BIN="${AICHAT_BIN:-target/bin/aichat}"
 
 setup() {
   # Create temporary role files for schema validation tests

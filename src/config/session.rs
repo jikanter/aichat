@@ -204,8 +204,6 @@ impl Session {
         cwd: &std::path::Path,
         out: &mut dyn std::io::Write,
     ) -> Result<()> {
-        use std::io::Write;
-
         // Prefer the serialized `model_id` field over `self.model().id()`:
         // the latter is the runtime resolved `Model` which may not be
         // populated yet (e.g. during conversion outside of a chat).

@@ -142,6 +142,31 @@ async fn run(config: GlobalConfig, mut cli: Cli, text: Option<String>) -> Result
                 cli.role = None;
                 cli.macro_name = Some(name);
             }
+            Ok(config::EntityRef::Remote { target, role }) => {
+                // Phase 20A: `aichat -r remote:NAME/role "input"` — invoke a
+                // remote role directly from the CLI. We dispatch via the
+                // pipeline runner (single Remote stage) so token metrics
+                // and the X-AIChat-Cost wiring stay consistent with the
+                // pipeline path. Keep the rest of `cli` untouched so flags
+                // like `-o json` still apply on the way out.
+                let input_text = text.clone().unwrap_or_default();
+                let stages = vec![crate::pipe::InlineStage {
+                    role: format!("remote:{target}/{role}"),
+                    model: None,
+                }];
+                let result = crate::pipe::run_inline_pipeline(
+                    &config,
+                    &stages,
+                    &input_text,
+                    create_abort_signal(),
+                )
+                .await?;
+                print!("{}", result.output);
+                if !result.output.ends_with('\n') {
+                    println!();
+                }
+                return Ok(());
+            }
             Err(e) if has_prefix => {
                 // The user's explicit prefix told us exactly what they meant;
                 // surface the precise classification error rather than letting
@@ -1095,16 +1120,51 @@ fn emit_dry_run_preview(role: &config::Role) {
     if !role.capabilities().is_empty() {
         eprintln!("  capabilities: [{}]", role.capabilities().join(", "));
     }
-    if let Some(stages) = role.pipeline() {
-        if !stages.is_empty() {
+    if let Some(nodes) = role.pipeline() {
+        if !nodes.is_empty() {
             eprintln!("--- Pipeline ---");
-            for (i, stage) in stages.iter().enumerate() {
-                let model = stage.model.as_deref().unwrap_or("(default model)");
-                eprintln!("  {}. {} ({})", i + 1, stage.role, model);
+            for (i, node) in nodes.iter().enumerate() {
+                render_pipeline_node(node, i + 1, 0);
             }
         }
     }
     eprintln!("--- Assembled Prompt ---");
+}
+
+/// Phase 21: render a pipeline node tree to stderr with indented children.
+fn render_pipeline_node(node: &config::PipelineNode, index: usize, depth: usize) {
+    let indent = "  ".repeat(depth + 1);
+    match node {
+        config::PipelineNode::Stage(s) => {
+            let model = s.model.as_deref().unwrap_or("(default model)");
+            eprintln!("{indent}{index}. {} ({model})", s.role);
+        }
+        config::PipelineNode::Parallel(p) => {
+            let merge = match &p.merge {
+                config::MergeStrategy::Concatenate => "concatenate".to_string(),
+                config::MergeStrategy::JsonArray => "json_array".to_string(),
+                config::MergeStrategy::CustomRole(r) => format!("custom_role: {r}"),
+            };
+            eprintln!(
+                "{indent}{index}. parallel ({} branches, merge: {merge})",
+                p.branches.len()
+            );
+            for (bi, b) in p.branches.iter().enumerate() {
+                render_pipeline_node(b, bi + 1, depth + 1);
+            }
+        }
+        config::PipelineNode::Switch(s) => {
+            eprintln!("{indent}{index}. switch ({} branches)", s.branches.len());
+            for (bi, b) in s.branches.iter().enumerate() {
+                let kind = match &b.predicate {
+                    Some(_) => "when",
+                    None => "otherwise",
+                };
+                eprintln!("{indent}  {}. ({kind})", bi + 1);
+                render_pipeline_node(&b.node, bi + 1, depth + 2);
+            }
+        }
+    }
 }
 
 /// Phase 12C / 14D: render a role list with optional verbose details
@@ -1180,7 +1240,8 @@ fn render_role_list(
         }
         if r.is_pipeline() {
             let n = r.pipeline().map(|p| p.len()).unwrap_or(0);
-            parts.push(format!("pipeline: {n} stage{}", if n == 1 { "" } else { "s" }));
+            let label = if r.pipeline_has_dag() { "node" } else { "stage" };
+            parts.push(format!("pipeline: {n} {label}{}", if n == 1 { "" } else { "s" }));
         }
         println!("  {:<width$}  {}", r.name(), parts.join("  "), width = name_width);
     }

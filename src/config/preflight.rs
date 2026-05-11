@@ -1,10 +1,11 @@
 use crate::client::Model;
 use crate::config::{
-    pipeline_stage_admissible, Config, EntityRef, Role, RoleLike,
+    pipeline_stage_admissible, Config, EntityRef, PipelineNode, Role, RoleLike,
 };
 use crate::function::FunctionDeclaration;
 
 use anyhow::{bail, Result};
+use std::collections::HashSet;
 
 /// Pre-flight validation of model capabilities against what the role/input requires.
 /// Runs before any API call; all checks are deterministic and zero-token.
@@ -71,9 +72,15 @@ pub fn validate_pipeline_stages(
         // `Agent::init` and is deferred to stage execution. We've confirmed
         // the agent name exists (classification passed) — that's the
         // strongest sync check we can offer here.
+        //
+        // Phase 20D: remote-stage validation needs an HTTP call to the
+        // remote's `/v1/roles/{name}` and is deferred to execution as well.
+        // Tool / model capability checks happen on the remote side; we just
+        // confirm the address parsed.
         let role_name = match &entity {
             EntityRef::Role(name) => name.clone(),
             EntityRef::Agent(_) => continue,
+            EntityRef::Remote { .. } => continue,
             EntityRef::Macro(_) => unreachable!("rejected by pipeline_stage_admissible"),
         };
 
@@ -113,6 +120,135 @@ pub fn validate_pipeline_stages(
     }
 
     Ok(())
+}
+
+/// Phase 21D: detect cycles in the pipeline-role reference graph.
+/// A pipeline role A whose stages reference another pipeline role B
+/// (which itself references A, directly or transitively) would loop
+/// infinitely through tool dispatch. Catch the cycle deterministically
+/// at preflight before any LLM call.
+///
+/// `entry` is the name of the role whose pipeline we're about to run.
+/// `nodes` is its DAG. We walk every leaf stage; if the stage resolves
+/// to another pipeline role, we recurse into that role's pipeline,
+/// extending the visit chain. Repeating a name → cycle.
+pub fn validate_pipeline_dag_cycles(
+    config: &Config,
+    entry: &str,
+    nodes: &[PipelineNode],
+) -> Result<()> {
+    let mut chain: Vec<String> = vec![entry.to_string()];
+    walk_pipeline_nodes(config, nodes, &mut chain)
+}
+
+fn walk_pipeline_nodes(
+    config: &Config,
+    nodes: &[PipelineNode],
+    chain: &mut Vec<String>,
+) -> Result<()> {
+    for n in nodes {
+        for stage in n.all_stages() {
+            check_stage_for_cycle(config, &stage.role, chain)?;
+        }
+        for merger in n.merge_role_names() {
+            check_stage_for_cycle(config, &merger, chain)?;
+        }
+    }
+    Ok(())
+}
+
+fn check_stage_for_cycle(
+    config: &Config,
+    stage_role: &str,
+    chain: &mut Vec<String>,
+) -> Result<()> {
+    // Reuse the role classifier so we don't double-error on agents/macros.
+    // Pipeline-role cycles only apply to actual roles — agents have their
+    // own tool semantics and macros aren't admissible as pipeline stages.
+    let entity = match config.classify_entity(stage_role) {
+        Ok(e) => e,
+        Err(_) => return Ok(()), // unknown — surfaced separately by validate_pipeline_stages
+    };
+    let resolved_role_name = match entity {
+        EntityRef::Role(name) => name,
+        _ => return Ok(()),
+    };
+
+    if chain.iter().any(|s| s == &resolved_role_name) {
+        let mut path = chain.clone();
+        path.push(resolved_role_name.clone());
+        bail!(
+            "Preflight: pipeline cycle detected — {} (a role's pipeline cannot \
+             transitively reference itself)",
+            path.join(" -> ")
+        );
+    }
+
+    let role = match config.retrieve_role(&resolved_role_name) {
+        Ok(r) => r,
+        Err(_) => return Ok(()),
+    };
+    if !role.is_pipeline() {
+        return Ok(());
+    }
+    let nodes = match role.pipeline() {
+        Some(n) => n.to_vec(),
+        None => return Ok(()),
+    };
+
+    chain.push(resolved_role_name);
+    let res = walk_pipeline_nodes(config, &nodes, chain);
+    chain.pop();
+    res
+}
+
+/// Phase 21D: walk the DAG and ensure every node's structural invariants
+/// hold (delegates to `PipelineNode::structural_check`) and that no
+/// switch declares dead branches. Currently `structural_check` covers
+/// the empty-branches / double-otherwise cases; we additionally detect
+/// `when:` branches placed *after* an `otherwise:` and warn — the
+/// runtime order-evaluation makes them reachable, but YAML readers tend
+/// to assume order-matters, and putting otherwise last is the
+/// universally-clear pattern.
+pub fn validate_pipeline_dag_structure(nodes: &[PipelineNode]) -> Result<()> {
+    let mut seen: HashSet<usize> = HashSet::new();
+    for (i, n) in nodes.iter().enumerate() {
+        n.structural_check()?;
+        if !seen.insert(i) {
+            // Defensive — indexes are unique by construction.
+        }
+        check_switch_branch_order(n)?;
+    }
+    Ok(())
+}
+
+fn check_switch_branch_order(n: &PipelineNode) -> Result<()> {
+    match n {
+        PipelineNode::Stage(_) => Ok(()),
+        PipelineNode::Parallel(p) => {
+            for b in &p.branches {
+                check_switch_branch_order(b)?;
+            }
+            Ok(())
+        }
+        PipelineNode::Switch(s) => {
+            let mut saw_otherwise = false;
+            for b in &s.branches {
+                if saw_otherwise && b.predicate.is_some() {
+                    bail!(
+                        "Switch branch order is misleading: a `when:` clause \
+                         appears after `otherwise:`. Move `otherwise:` to the \
+                         last position so reading order matches evaluation."
+                    );
+                }
+                if b.predicate.is_none() {
+                    saw_otherwise = true;
+                }
+                check_switch_branch_order(&b.node)?;
+            }
+            Ok(())
+        }
+    }
 }
 
 #[cfg(test)]
@@ -167,5 +303,64 @@ mod tests {
         let m = model_with(false, true);
         let r = Role::default();
         assert!(validate_model_capabilities(&m, &r, None, true).is_ok());
+    }
+
+    // ----- Phase 21D: DAG structural validation -----
+
+    fn yaml_node(yaml: &str) -> PipelineNode {
+        let v: serde_json::Value = serde_yaml::from_str(yaml).unwrap();
+        crate::config::role::parse_pipeline_node(&v).unwrap()
+    }
+
+    #[test]
+    fn dag_structural_rejects_when_after_otherwise() {
+        let n = yaml_node(
+            r#"
+switch:
+  - when: { contains: "x" }
+    role: a
+  - otherwise: true
+    role: b
+  - when: { contains: "y" }
+    role: c
+"#,
+        );
+        let err = validate_pipeline_dag_structure(&[n]).unwrap_err();
+        assert!(err.to_string().contains("after `otherwise:`"));
+    }
+
+    #[test]
+    fn dag_structural_accepts_otherwise_last() {
+        let n = yaml_node(
+            r#"
+switch:
+  - when: { contains: "x" }
+    role: a
+  - when: { contains: "y" }
+    role: b
+  - otherwise: true
+    role: c
+"#,
+        );
+        assert!(validate_pipeline_dag_structure(&[n]).is_ok());
+    }
+
+    #[test]
+    fn dag_structural_recurses_into_parallel_branches() {
+        let n = yaml_node(
+            r#"
+parallel:
+  - role: a
+  - switch:
+      - when: { contains: "x" }
+        role: b
+      - otherwise: true
+        role: c
+      - when: { contains: "y" }
+        role: d
+"#,
+        );
+        let err = validate_pipeline_dag_structure(&[n]).unwrap_err();
+        assert!(err.to_string().contains("after `otherwise:`"));
     }
 }
