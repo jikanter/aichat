@@ -5,7 +5,7 @@ AIchat is a command-line swiss army knife for ai applications.
 <brief:generated>
 # Briefing: Eridian - Your Alien AI Assistant
 
-**Stack:** Rust 1.95.0, Cargo, Bash, argc, llm-functions, python3.13
+**Stack:** Rust 1.95.0, Cargo, Bash, argc, llm-functions, python3.13, nodejs, pi
 
 ## Reference Context
 
@@ -16,7 +16,7 @@ Read these files for background before starting work:
 - @docs/architecture/architecture.md
 
 ## Deliverable
-A multi-tool for integrated interactions with AI models.
+A multi-tool for integrated interactions with AI models.A useful set of extensions to the pi harness for interaction with the tool.
 
 ## Hard
 
@@ -28,15 +28,7 @@ A multi-tool for integrated interactions with AI models.
 
 - This tool should function using the "one tool per job" unix ethos
 - This tool should use the 'showboat' command to demo its work. Use the output of `showboat --help` to understand how to implement.
-- Implement both repl and batch interaction surfaces for functionality. The
-  default REPL is the [pi coding-agent harness](https://github.com/earendil-works/pi),
-  launched via `src/repl/pi.rs` (see `docs/repl-pi.md`). The built-in
-  Reedline REPL remains under `src/repl/{mod.rs,completer.rs,
-  highlighter.rs,prompt.rs}` behind `--legacy-repl` / `AICHAT_REPL=legacy`
-  for indefinite side-by-side testing. New REPL features land as pi
-  extension commands in `pi-extensions/` and bridge endpoints in
-  `src/serve.rs` (`/v1/state/*`); only fix the legacy REPL if the change
-  is also relevant to it.
+- Implement both repl and batch interaction surfaces for functionality
 - Read through the files in the https://github.com/simonw/showboat/blob/main/docs/plans/ and add any skills to the project.
 
 ## Ask First
