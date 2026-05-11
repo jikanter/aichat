@@ -833,7 +833,7 @@
   </div>
   <script>
     const QUERY = parseQueryString();
-    const API_BASE = QUERY.api_base || "./v1";
+    const API_BASE = QUERY.api_base || "/v1";
     const API_KEY = QUERY.api_key || "";
     const CHAT_COMPLETIONS_URL = API_BASE + "/chat/completions";
     const MODELS_API = API_BASE + "/models";
@@ -890,7 +890,7 @@
               this.rags.push(...rags);
             }).catch(() => { }),
             fetchJSON(ROLES_API).then(roles => {
-              this.roles.push(...roles.filter(v => !!v.prompt));
+              this.roles.push(...roles);
             }).catch(() => { }),
           ])
           this.$refs.input.addEventListener("paste", (e) => this.handlePaste(e));
@@ -1004,7 +1004,11 @@
           if (this.settings.prompt && !this.settings.role) {
             return;
           }
-          this.settings.prompt = this.roles.find(role => role.name === this.settings.role).prompt;
+          // The role's prompt body is server-private; selecting a role
+          // routes submit through the `role:NAME` virtual model so the
+          // server resolves it. Clear the local textarea so it isn't
+          // also prepended.
+          this.settings.prompt = "";
         },
 
         handleScrollChatBody(event) {
@@ -1303,7 +1307,9 @@
           }
           sanitizeMessages(messages);
           const body = {
-            model: this.settings.model,
+            model: this.settings.role
+              ? `role:${this.settings.role}`
+              : this.settings.model,
             messages: messages,
             stream: true,
           };
