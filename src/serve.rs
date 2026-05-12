@@ -251,7 +251,7 @@ impl Server {
         } else if path == "/v1/models" {
             self.list_models()
         } else if path == "/v1/roles" {
-            self.list_roles()
+            self.list_roles(query_flag(&uri, "include_prompt"))
         } else if let Some(rest) = path.strip_prefix("/v1/roles/") {
             // Phase 17B: `/v1/roles/{name}/invoke` is matched ahead of the
             // bare single-role retrieval. Future Phase 17C streaming variant
@@ -259,7 +259,7 @@ impl Server {
             if let Some(name) = rest.strip_suffix("/invoke") {
                 self.invoke_role(name, req).await
             } else {
-                self.get_role(rest)
+                self.get_role(rest, query_flag(&uri, "include_prompt"))
             }
         } else if path == "/v1/prompts" {
             self.list_prompts()
@@ -326,12 +326,23 @@ impl Server {
         Ok(res)
     }
 
-    fn list_roles(&self) -> Result<AppResponse> {
+    fn list_roles(&self, include_prompt: bool) -> Result<AppResponse> {
         // Phase 16F/16G: serialize through `RolePublicView` so the prompt
         // body and any server-local wiring (pipe_to, save_to, mcp_servers,
-        // pipeline stage names) stay private.
-        let views: Vec<RolePublicView> =
-            self.roles.iter().map(RolePublicView::from).collect();
+        // pipeline stage names) stay private by default. The local
+        // playground opts back in with `?include_prompt=1`.
+        let views: Vec<RolePublicView> = self
+            .roles
+            .iter()
+            .map(|r| {
+                let v = RolePublicView::from(r);
+                if include_prompt {
+                    v.with_prompt(r)
+                } else {
+                    v
+                }
+            })
+            .collect();
         let data = json!({ "data": views });
         let res = Response::builder()
             .header("Content-Type", "application/json; charset=utf-8")
@@ -346,7 +357,7 @@ impl Server {
     /// to the global Not-Found handler so they can't accidentally collide
     /// with role names. The Phase 17B `/v1/roles/{name}/invoke` route is
     /// matched ahead of this one in `handle()`.
-    fn get_role(&self, name: &str) -> Result<AppResponse> {
+    fn get_role(&self, name: &str, include_prompt: bool) -> Result<AppResponse> {
         if name.is_empty() || name.contains('/') {
             return self.build_not_found("Not Found");
         }
@@ -354,7 +365,10 @@ impl Server {
             Some(r) => r,
             None => return self.build_not_found(&format!("Role '{name}' not found")),
         };
-        let view = RolePublicView::from(role);
+        let mut view = RolePublicView::from(role);
+        if include_prompt {
+            view = view.with_prompt(role);
+        }
         let body = serde_json::to_string(&view)?;
         let res = Response::builder()
             .header("Content-Type", "application/json; charset=utf-8")

@@ -1074,6 +1074,19 @@ pub struct RolePublicView {
     /// Phase 14B port summary, e.g. `"text"`, `"json{a, b}"`, `"any"`.
     pub port_input: String,
     pub port_output: String,
+    /// Opt-in only: populated when callers explicitly request the prompt
+    /// body (e.g. the local playground via `?include_prompt=1`). Default
+    /// `From<&Role>` leaves this `None` so federated/remote `/v1/roles`
+    /// responses still hide it.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub prompt: Option<String>,
+}
+
+impl RolePublicView {
+    pub fn with_prompt(mut self, role: &Role) -> Self {
+        self.prompt = Some(role.prompt().to_string());
+        self
+    }
 }
 
 impl From<&Role> for RolePublicView {
@@ -1102,6 +1115,7 @@ impl From<&Role> for RolePublicView {
             pipeline_length: role.pipeline().map(<[PipelineNode]>::len).unwrap_or(0),
             port_input: role.port_input_summary(),
             port_output: role.port_output_summary(),
+            prompt: None,
         }
     }
 }
