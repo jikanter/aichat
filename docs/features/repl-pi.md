@@ -135,7 +135,7 @@ Limitations of the converter:
 
 ## Bridge security
 
-Each `--pi-repl` launch:
+Each pi launch:
 
 1. Probes `127.0.0.1:8000-9000` for an already-running aichat server it
    can authenticate against. If one is found it is **reused**; otherwise
@@ -151,13 +151,40 @@ Each `--pi-repl` launch:
    matching `Authorization: Bearer <tok>` header. Token comparison is
    constant-time.
 
+### Server discovery
+
+The probe sends an authenticated `GET /v1/state/info` to each port and
+classifies the response — reuse is deliberately strict, so every bridged
+slash command is guaranteed to work against whatever server it attaches
+to:
+
+| Target | Response | Probe verdict |
+|---|---|---|
+| Non-aichat server, or `aichat --serve` with no bridge token | `404` | skip |
+| aichat bridge, **different** token | `401` | skip |
+| aichat bridge, **matching** token | `200` + `{"info": ...}` | **reuse** (lowest matching port wins) |
+
+A token-less `aichat --serve` is therefore invisible to discovery: its
+`/v1/state/*` routes return `404`, so the probe never attaches a REPL to
+a server whose slash commands would all fail. Reuse requires
+`AICHAT_BRIDGE_TOKEN` to be exported both for the long-lived server and
+for the REPL session, and the two values must match.
+
+- **Match found** — the discovered URL becomes the bridge URL; no
+  in-process server is started, and the reused server is left running
+  when the REPL exits.
+- **No match** — aichat binds an ephemeral port, mints a fresh
+  per-launch token, and starts a private in-process server it shuts down
+  on exit.
+
+Set `AICHAT_NO_SERVER_PROBE=1` to skip discovery entirely and always
+start a private server.
+
 The CLI `--serve` mode does **not** see these routes — when
 `AICHAT_BRIDGE_TOKEN` is unset at server start, `/v1/state/*` returns 404.
 
 For how to export `AICHAT_BRIDGE_TOKEN` to share one long-lived server
-across REPL sessions, and how the 8000–9000 probe decides what to reuse,
-see [`server.md`](server.md). Set `AICHAT_NO_SERVER_PROBE=1` to skip the
-probe entirely and always start a private server.
+across REPL sessions, see [`server.md`](server.md).
 
 ## Troubleshooting
 

@@ -142,3 +142,8 @@ export AICHAT_REPL=legacy   # in your shell rc
 The original session YAML files are untouched by the converter. Pi's
 imported copies live under `~/.pi/agent/sessions/` and can be deleted at
 will.
+
+## See also
+
+- [Aichat Pi Repl Documentation](./repl-pi.md)
+- [Repl Server Discovery Showboat Demo](../demos/phase-26a-server-discovery.md)
