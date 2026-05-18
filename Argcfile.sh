@@ -461,6 +461,7 @@ _die() {
 # @arg files+
 brief-format() {
     local exit_code=0
+
     for file in "${argc_files[@]}"; do
         if [[ ! -f "$file" ]]; then
             echo "error: file not found: $file"
@@ -481,6 +482,35 @@ brief-format() {
     done
     return $exit_code
 }
+
+# @cmd install a development build with cargo
+dev-install() { 
+    cargo install --path=.
+}
+
+# @cmd chat the the pi harness is installed
+check-pi() { 
+    exit_code=0
+    pi=$(type -p pi)
+    if [[ -z "$pi" ]]; then 
+        printf "%s\n" "pi harness not installed"
+        exit_code=1
+    fi
+    return $exit_code
+}
+
+# @cmd check that brief tool is installed
+check-brief() { 
+    exit_code=0
+    brief=$(type -p brief)
+    if [[ -z "$brief" ]]; then 
+        printf "%s\n" "brief tool is not installed, get it from https://github.com/jikanter/brief"
+        exit_code=1
+    fi
+    return $exit_code
+}
+
+
 
 # See more details at https://github.com/sigoden/argc
 eval "$(argc --argc-eval "$0" "$@")"
