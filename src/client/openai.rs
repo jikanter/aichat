@@ -402,20 +402,30 @@ pub fn openai_extract_chat_completions(data: &Value) -> Result<ChatCompletionsOu
     let mut tool_calls = vec![];
     if let Some(calls) = data["choices"][0]["message"]["tool_calls"].as_array() {
         for call in calls {
-            if let (Some(name), Some(arguments), Some(id)) = (
-                call["function"]["name"].as_str(),
-                call["function"]["arguments"].as_str(),
-                call["id"].as_str(),
-            ) {
-                let arguments: Value = arguments.parse().with_context(|| {
-                    format!("Tool call '{name}' have non-JSON arguments '{arguments}'")
-                })?;
-                tool_calls.push(ToolCall::new(
-                    name.to_string(),
-                    arguments,
-                    Some(id.to_string()),
-                ));
-            }
+            let Some(name) = call["function"]["name"].as_str() else {
+                continue;
+            };
+            // OpenAI-compatible providers vary in how they encode a tool
+            // call. `arguments` may be a JSON string (the OpenAI spec), a
+            // JSON object (vLLM, llama.cpp, some Mistral endpoints), an empty
+            // string, or absent; `id` is also optional on several of them.
+            // Tolerate every shape rather than silently dropping the call.
+            let arguments = match &call["function"]["arguments"] {
+                Value::String(s) => {
+                    let s = s.trim();
+                    if s.is_empty() {
+                        json!({})
+                    } else {
+                        s.parse().with_context(|| {
+                            format!("Tool call '{name}' have non-JSON arguments '{s}'")
+                        })?
+                    }
+                }
+                Value::Null => json!({}),
+                other => other.clone(),
+            };
+            let id = normalize_function_id(call["id"].as_str().unwrap_or_default());
+            tool_calls.push(ToolCall::new(name.to_string(), arguments, id));
         }
     };
 
