@@ -3270,10 +3270,22 @@ pub async fn macro_execute(
     config.discontinuous_last_message();
     let config = Arc::new(RwLock::new(config));
     config.write().macro_flag = true;
+    let mut prev_output = String::new();
     for step in &macro_value.steps {
-        let command = Macro::interpolate_command(step, &variables);
+        let mut command = Macro::interpolate_command(step, &variables);
+        // Phase 28C: substitute `%%` with the previous step's AI output for
+        // inline use in plain-text prompts. Skip dot commands so existing
+        // path-style usages like `.file %%` keep their REPL-level meaning.
+        if !prev_output.is_empty() && !command.trim_start().starts_with('.') {
+            command = command.replace("%%", &prev_output);
+        }
         println!(">> {}", multiline_text(&command));
         run_repl_command(&config, abort_signal.clone(), &command).await?;
+        if let Some(last_message) = config.read().last_message.as_ref() {
+            if !last_message.output.is_empty() {
+                prev_output = last_message.output.clone();
+            }
+        }
     }
     Ok(())
 }
