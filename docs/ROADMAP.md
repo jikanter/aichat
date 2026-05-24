@@ -1,6 +1,6 @@
 # Eridian Roadmap
 
-**Last updated:** 2026-05-11
+**Last updated:** 2026-05-23
 
 ## Vision
 
@@ -30,6 +30,7 @@ One row per phase. "Sub-phases" lists the granular state; "Last update" is the m
 | 3 Composition UX | 13 | Authoring & teaching | 13A–D **Planned** | 2026-05-11 | [phase-13-overview.md](roadmap/phase-13-overview.md) |
 | 4 Typed Ports | 14 | Capability manifests | 14A–D **Done** | 2026-05-04 | [phase-14-overview.md](roadmap/phase-14-overview.md) |
 | 4 Typed Ports | 15 | Contract testing | 15A **Partial**, 15B/C **Planned** | 2026-05-11 | [phase-15-overview.md](roadmap/phase-15-overview.md) |
+| 4 Typed Ports | 33 | Typed input surface | 33A–E **Planned** | 2026-05-23 | [phase-33-overview.md](roadmap/phase-33-overview.md) |
 | 5 Server Engine | 16 | Server hardening | 16F/G/H **Done**; 16A–E **Deferred** | 2026-05-11 | [phase-16-overview.md](roadmap/phase-16-overview.md) |
 | 5 Server Engine | 17 | Role & pipeline execution | 17A–E **Done** (un-deferred) | 2026-05-11 | [phase-17-overview.md](roadmap/phase-17-overview.md) |
 | 5 Server Engine | 18 | Discovery & estimation | 18A–C **Deferred** | 2026-04-17 | [phase-18-overview.md](roadmap/phase-18-overview.md) |
@@ -52,7 +53,7 @@ One row per phase. "Sub-phases" lists the granular state; "Last update" is the m
 
 ## Active Track
 
-Sequential critical path: **Phase 11D → Phase 13 → Phase 15B/C → Phase 22**.
+Sequential critical path: **Phase 11D → Phase 13 → Phase 15B/C → Phase 33 → Phase 22**. Phase 33 (typed input surface) slots after 15B/C because 33D extends the same containment-check logic into adjacent-stage shape validation.
 Parallel independent tracks: **Epic 8** (Phases 23–24, role evaluation) and **Epic 10** (Phases 28–29, agent evolution).
 Deferred: **Phase 18** (server discovery/estimation), **Phase 16A–E** (server hardening beyond what Phase 20 federation required).
 
