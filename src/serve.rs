@@ -101,6 +101,21 @@ struct Server {
     /// When `None`, `/v1/state/*` routes 404 (CLI `--serve` users never see
     /// them). When `Some`, requests must carry `Authorization: Bearer <tok>`.
     bridge_token: Option<String>,
+    /// Phase 16B: optional public bearer-token gate (`serve_api_key:`). When
+    /// `Some`, every request except `OPTIONS` and `GET /health` must present
+    /// `Authorization: Bearer <key>`. Distinct from `bridge_token`, which
+    /// only guards the `/v1/state/*` REPL bridge.
+    api_key: Option<String>,
+    /// Phase 16A: cross-origin policy resolved from config at boot.
+    cors: CorsPolicy,
+    /// Phase 16E: the role/model/prompt/rag listing, behind a lock so
+    /// `POST /v1/reload` can rebuild it from disk without a restart.
+    listing: RwLock<Listing>,
+}
+
+/// Phase 16E: the disk-derived listing the OpenAI-compatible surface serves.
+/// Held behind a lock so `/v1/reload` can swap in a fresh snapshot.
+struct Listing {
     models: Vec<Value>,
     roles: Vec<Role>,
     prompts: Vec<Prompt>,
@@ -113,7 +128,24 @@ impl Server {
         // listings the OpenAI-compatible surface exposes. The live lock
         // (`self.config`) is what state-mutating bridge endpoints touch.
         let snapshot = config.read().clone();
-        let mut models = list_all_models(&snapshot);
+        let cors = CorsPolicy::from_config(&snapshot);
+        let api_key = snapshot.serve_api_key.clone();
+        let listing = Self::build_listing(&snapshot);
+        Self {
+            config: config.clone(),
+            bridge_token: std::env::var("AICHAT_BRIDGE_TOKEN").ok(),
+            api_key,
+            cors,
+            listing: RwLock::new(listing),
+        }
+    }
+
+    /// Build the model/role/prompt/rag listing from a config snapshot. Used
+    /// at boot (`new`) and on hot-reload (`reload`). Roles, prompts, and rags
+    /// are re-read from disk on every call; provider models come from the
+    /// in-memory config (on-disk `clients:` edits still need a restart).
+    fn build_listing(snapshot: &Config) -> Listing {
+        let mut models = list_all_models(snapshot);
         let mut default_model = snapshot.model.clone();
         default_model.data_mut().name = DEFAULT_MODEL_NAME.into();
         models.insert(0, &default_model);
@@ -151,9 +183,7 @@ impl Server {
                 "owned_by": "aichat-role",
             }));
         }
-        Self {
-            config: config.clone(),
-            bridge_token: std::env::var("AICHAT_BRIDGE_TOKEN").ok(),
+        Listing {
             models,
             prompts: Config::all_prompts(),
             roles,
@@ -222,7 +252,7 @@ impl Server {
         if method == Method::OPTIONS {
             let mut res = Response::default();
             *res.status_mut() = StatusCode::NO_CONTENT;
-            set_cors_header(&mut res, request_origin.as_deref());
+            set_cors_header(&mut res, request_origin.as_deref(), &self.cors);
             return Ok(res);
         }
 
@@ -230,19 +260,42 @@ impl Server {
         // pi-side slash commands (defined in pi-extensions/) take effect for
         // subsequent /v1/chat/completions on the same server. Gated by a
         // per-launch bearer token; absent CLI `--serve` users never see
-        // these routes, they just 404 like any unknown path.
+        // these routes, they just 404 like any unknown path. The bridge has
+        // its own token, so it is exempt from the public `serve_api_key` gate.
         if path.starts_with("/v1/state/") {
             let mut res = self
                 .handle_bridge(&method, path, req)
                 .await
                 .unwrap_or_else(ret_err);
-            set_cors_header(&mut res, request_origin.as_deref());
+            set_cors_header(&mut res, request_origin.as_deref(), &self.cors);
             info!("{method} {uri} {}", res.status().as_u16());
             return Ok(res);
         }
 
+        // Phase 16B: optional public bearer-token gate. `/health` stays open
+        // so orchestration probes (Docker/K8s/systemd) work without a key.
+        if path != "/health" {
+            let provided = req
+                .headers()
+                .get(hyper::header::AUTHORIZATION)
+                .and_then(|v| v.to_str().ok());
+            if !check_api_key(self.api_key.as_deref(), provided) {
+                let mut res = json_response(
+                    StatusCode::UNAUTHORIZED,
+                    json!({ "error": { "code": 401, "message": "Unauthorized" } }),
+                );
+                set_cors_header(&mut res, request_origin.as_deref(), &self.cors);
+                info!("{method} {uri} 401");
+                return Ok(res);
+            }
+        }
+
         let mut status = StatusCode::OK;
-        let res = if path == "/v1/chat/completions" {
+        let res = if path == "/health" {
+            self.health()
+        } else if path == "/v1/reload" {
+            self.reload_endpoint()
+        } else if path == "/v1/chat/completions" {
             self.chat_completions(req).await
         } else if path == "/v1/embeddings" {
             self.embeddings(req).await
@@ -300,8 +353,45 @@ impl Server {
             }
         };
         *res.status_mut() = status;
-        set_cors_header(&mut res, request_origin.as_deref());
+        set_cors_header(&mut res, request_origin.as_deref(), &self.cors);
         Ok(res)
+    }
+
+    /// Phase 16C: unauthenticated liveness/readiness probe. Reports the
+    /// number of provider models (excluding `role:*` virtual models) and the
+    /// number of roles currently served.
+    fn health(&self) -> Result<AppResponse> {
+        let listing = self.listing.read();
+        let n_models = listing
+            .models
+            .iter()
+            .filter(|m| m["owned_by"] != json!("aichat-role"))
+            .count();
+        let body = json!({
+            "status": "ok",
+            "models": n_models,
+            "roles": listing.roles.len(),
+        });
+        Ok(json_response(StatusCode::OK, body))
+    }
+
+    /// Phase 16E: hot-reload the role/model/prompt/rag listing from disk.
+    /// Re-reads role, prompt, and rag files so role-development edits take
+    /// effect without a server restart. Returns the new counts.
+    fn reload_endpoint(&self) -> Result<AppResponse> {
+        let snapshot = self.config.read().clone();
+        let listing = Self::build_listing(&snapshot);
+        let n_roles = listing.roles.len();
+        let n_models = listing
+            .models
+            .iter()
+            .filter(|m| m["owned_by"] != json!("aichat-role"))
+            .count();
+        *self.listing.write() = listing;
+        Ok(json_response(
+            StatusCode::OK,
+            json!({ "roles": n_roles, "models": n_models }),
+        ))
     }
 
     fn playground_page(&self) -> Result<AppResponse> {
@@ -319,7 +409,7 @@ impl Server {
     }
 
     fn list_models(&self) -> Result<AppResponse> {
-        let data = json!({ "data": self.models });
+        let data = json!({ "data": self.listing.read().models });
         let res = Response::builder()
             .header("Content-Type", "application/json; charset=utf-8")
             .body(Full::new(Bytes::from(data.to_string())).boxed())?;
@@ -332,6 +422,8 @@ impl Server {
         // pipeline stage names) stay private by default. The local
         // playground opts back in with `?include_prompt=1`.
         let views: Vec<RolePublicView> = self
+            .listing
+            .read()
             .roles
             .iter()
             .map(|r| {
@@ -361,7 +453,8 @@ impl Server {
         if name.is_empty() || name.contains('/') {
             return self.build_not_found("Not Found");
         }
-        let role = match self.roles.iter().find(|r| r.name() == name) {
+        let listing = self.listing.read();
+        let role = match listing.roles.iter().find(|r| r.name() == name) {
             Some(r) => r,
             None => return self.build_not_found(&format!("Role '{name}' not found")),
         };
@@ -515,8 +608,9 @@ impl Server {
         }
         // Phase 16F: 404 before reading the body when the role doesn't exist
         // on this server, so a misaddressed caller doesn't waste bandwidth
-        // on a payload we'll discard.
-        if !self.roles.iter().any(|r| r.name() == role_name) {
+        // on a payload we'll discard. Scope the read guard so it isn't held
+        // across the `await`s below.
+        if !self.listing.read().roles.iter().any(|r| r.name() == role_name) {
             return self.build_not_found(&format!("Role '{role_name}' not found"));
         }
 
@@ -717,7 +811,7 @@ impl Server {
     }
 
     fn list_prompts(&self) -> Result<AppResponse> {
-        let data = json!({ "data": self.prompts });
+        let data = json!({ "data": self.listing.read().prompts });
         let res = Response::builder()
             .header("Content-Type", "application/json; charset=utf-8")
             .body(Full::new(Bytes::from(data.to_string())).boxed())?;
@@ -725,7 +819,7 @@ impl Server {
     }
 
     fn list_rags(&self) -> Result<AppResponse> {
-        let data = json!({ "data": self.rags });
+        let data = json!({ "data": self.listing.read().rags });
         let res = Response::builder()
             .header("Content-Type", "application/json; charset=utf-8")
             .body(Full::new(Bytes::from(data.to_string())).boxed())?;
@@ -991,6 +1085,7 @@ impl Server {
             top_p,
             max_tokens,
             stream,
+            stream_options,
             tools,
         } = req_body;
 
@@ -1000,7 +1095,7 @@ impl Server {
         // `top_p`, and `tools` from the request body are deliberately
         // ignored so the role's declaration wins.
         if let Some(role_name) = model.strip_prefix("role:") {
-            if !self.roles.iter().any(|r| r.name() == role_name) {
+            if !self.listing.read().roles.iter().any(|r| r.name() == role_name) {
                 return self.build_not_found(&format!("Role '{role_name}' not found"));
             }
             return self
@@ -1043,6 +1138,21 @@ impl Server {
 
         patch_messages(&mut messages, client.model());
 
+        // Phase 16D: honor `stream_options: {include_usage: true}`. When the
+        // model streams, inject the same option upstream so OpenAI-compatible
+        // providers append a usage block to their final chunk; the handler
+        // captures it and we re-emit it to the caller. For `no_stream` models
+        // the usage comes straight from the buffered non-streaming response.
+        let include_usage = stream_options
+            .as_ref()
+            .map(|o| o.include_usage)
+            .unwrap_or(false);
+        let extensions = if include_usage && stream && !client.model().no_stream() {
+            Some(json!({ "stream_options": { "include_usage": true } }))
+        } else {
+            None
+        };
+
         let data: ChatCompletionsData = ChatCompletionsData {
             messages,
             temperature,
@@ -1050,7 +1160,7 @@ impl Server {
             functions,
             stream,
             output_schema: None,
-            extensions: None,
+            extensions,
         };
 
         if stream {
@@ -1087,6 +1197,7 @@ impl Server {
                     mut data: ChatCompletionsData,
                     tx: &UnboundedSender<ResEvent>,
                     is_first: Arc<AtomicBool>,
+                    include_usage: bool,
                 ) {
                     if client.model().no_stream() {
                         data.stream = false;
@@ -1094,13 +1205,24 @@ impl Server {
                         match ret {
                             Ok(output) => {
                                 let ChatCompletionsOutput {
-                                    text, tool_calls, ..
+                                    text,
+                                    tool_calls,
+                                    input_tokens,
+                                    output_tokens,
+                                    ..
                                 } = output;
                                 let _ = tx.send(ResEvent::First(None));
                                 is_first.store(false, Ordering::SeqCst);
                                 let _ = tx.send(ResEvent::Text(text));
                                 if !tool_calls.is_empty() {
                                     let _ = tx.send(ResEvent::ToolCalls(tool_calls));
+                                }
+                                if include_usage {
+                                    let _ = tx.send(ResEvent::Usage(build_usage_value(
+                                        client,
+                                        input_tokens.unwrap_or(0),
+                                        output_tokens.unwrap_or(0),
+                                    )));
                                 }
                             }
                             Err(err) => {
@@ -1124,6 +1246,16 @@ impl Server {
                         if !tool_calls.is_empty() {
                             let _ = tx.send(ResEvent::ToolCalls(tool_calls));
                         }
+                        // Phase 16D: emit the captured usage (if any) just
+                        // before Done so it lands as the final chunk's usage.
+                        if include_usage {
+                            let (it, ot) = handler.usage();
+                            let _ = tx.send(ResEvent::Usage(build_usage_value(
+                                client,
+                                it.unwrap_or(0),
+                                ot.unwrap_or(0),
+                            )));
+                        }
                     }
                     handler.done();
                 }
@@ -1135,7 +1267,8 @@ impl Server {
                         &mut handler,
                         data,
                         &tx,
-                        is_first
+                        is_first,
+                        include_usage,
                     ),
                 );
             });
@@ -1166,6 +1299,12 @@ impl Server {
                                 &tool_calls,
                             )))
                         }
+                        ResEvent::Usage(usage) => Some(Ok(create_usage_frame(
+                            completion_id,
+                            model,
+                            *created,
+                            &usage,
+                        ))),
                         ResEvent::Done => Some(Ok(create_done_frame(
                             completion_id,
                             model,
@@ -1669,7 +1808,19 @@ struct ChatCompletionsReqBody {
     max_tokens: Option<isize>,
     #[serde(default)]
     stream: bool,
+    /// Phase 16D: OpenAI's `stream_options`. Only `include_usage` is honored.
+    #[serde(default)]
+    stream_options: Option<StreamOptions>,
     tools: Option<Vec<Value>>,
+}
+
+/// Phase 16D: subset of OpenAI's `stream_options`. When `include_usage` is
+/// true, the streaming response carries a trailing usage chunk before
+/// `[DONE]` (matching `stream_options: {"include_usage": true}`).
+#[derive(Debug, Deserialize)]
+struct StreamOptions {
+    #[serde(default)]
+    include_usage: bool,
 }
 
 #[derive(Debug, Deserialize)]
@@ -1698,6 +1849,9 @@ enum ResEvent {
     First(Option<String>),
     Text(String),
     ToolCalls(Vec<ToolCall>),
+    /// Phase 16D: a finished `usage` block (prompt/completion/total tokens +
+    /// `cost_usd`) emitted just before `Done` when the caller requested it.
+    Usage(Value),
     Done,
 }
 
@@ -1712,14 +1866,55 @@ fn generate_completion_id() -> String {
     format!("chatcmpl-{random_id}")
 }
 
-/// Set CORS headers only for requests originating from localhost.
+/// Phase 16A: which cross-origin requests `--serve` answers with CORS
+/// headers. Localhost is always allowed (the bundled playground/arena run
+/// same-origin, but browsers still send `Origin` on some requests). Operators
+/// widen this with `serve_cors_origins:` or, on trusted networks,
+/// `serve_cors_allow_all: true`.
+#[derive(Clone, Default)]
+struct CorsPolicy {
+    allow_all: bool,
+    origins: Vec<String>,
+}
+
+impl CorsPolicy {
+    fn from_config(config: &Config) -> Self {
+        Self {
+            allow_all: config.serve_cors_allow_all,
+            origins: config.serve_cors_origins.clone().unwrap_or_default(),
+        }
+    }
+
+    /// True when a request from `origin` should receive CORS headers.
+    fn allows(&self, origin: &str) -> bool {
+        self.allow_all
+            || self.origins.iter().any(|o| o == origin)
+            || is_local_origin(origin)
+    }
+}
+
+/// Phase 16B: returns whether a request clears the optional bearer-token gate.
+/// When no key is configured every request passes (historical behavior).
+/// Comparison is constant-time to avoid leaking the key via timing.
+fn check_api_key(configured: Option<&str>, auth_header: Option<&str>) -> bool {
+    let Some(key) = configured else {
+        return true;
+    };
+    let provided = auth_header
+        .and_then(|s| s.strip_prefix("Bearer "))
+        .unwrap_or("");
+    constant_time_eq(provided.as_bytes(), key.as_bytes())
+}
+
+/// Set CORS headers when the request origin is permitted by `policy`.
 ///
 /// This prevents arbitrary websites from making cross-origin requests to the
-/// local API server (e.g. a malicious page exfiltrating data via the LLM).
+/// API server (e.g. a malicious page exfiltrating data via the LLM). Localhost
+/// is always allowed; `serve_cors_origins` / `serve_cors_allow_all` widen it.
 /// Same-origin requests (playground, arena) are unaffected by CORS.
-fn set_cors_header(res: &mut AppResponse, request_origin: Option<&str>) {
+fn set_cors_header(res: &mut AppResponse, request_origin: Option<&str>, policy: &CorsPolicy) {
     let origin = match request_origin {
-        Some(o) if is_local_origin(o) => o,
+        Some(o) if policy.allows(o) => o,
         _ => return,
     };
     if let Ok(value) = hyper::header::HeaderValue::from_str(origin) {
@@ -1836,6 +2031,32 @@ fn build_chat_completion_chunk_json(id: &str, model: &str, created: i64, choice:
         "created": created,
         "model": model,
         "choices": [choice],
+    })
+}
+
+/// Phase 16D: an OpenAI-style usage-only chunk — `choices: []` plus a
+/// `usage` object — emitted right before `[DONE]` when the caller set
+/// `stream_options: {include_usage: true}`.
+fn create_usage_frame(id: &str, model: &str, created: i64, usage: &Value) -> Frame<Bytes> {
+    let value = json!({
+        "id": id,
+        "object": "chat.completion.chunk",
+        "created": created,
+        "model": model,
+        "choices": [],
+        "usage": usage,
+    });
+    Frame::data(Bytes::from(format!("data: {value}\n\n")))
+}
+
+/// Phase 16D: assemble the streaming `usage` object, multiplying token
+/// counts by the active model's prices for `cost_usd`.
+fn build_usage_value(client: &dyn Client, input_tokens: u64, output_tokens: u64) -> Value {
+    json!({
+        "prompt_tokens": input_tokens,
+        "completion_tokens": output_tokens,
+        "total_tokens": input_tokens + output_tokens,
+        "cost_usd": compute_cost(client.model(), input_tokens, output_tokens),
     })
 }
 
@@ -2125,5 +2346,108 @@ mod tests {
     #[test]
     fn returns_none_for_empty_messages() {
         assert_eq!(extract_last_user_message(&[]), None);
+    }
+
+    // ---- Phase 16A: CorsPolicy ----
+
+    #[test]
+    fn cors_localhost_is_always_allowed() {
+        let policy = CorsPolicy::default();
+        assert!(policy.allows("http://localhost:3000"));
+        assert!(policy.allows("http://127.0.0.1:8000"));
+        assert!(policy.allows("http://localhost"));
+        assert!(policy.allows("http://0.0.0.0:8000"));
+    }
+
+    #[test]
+    fn cors_rejects_unlisted_remote_origin_by_default() {
+        let policy = CorsPolicy::default();
+        assert!(!policy.allows("https://evil.example.com"));
+        assert!(!policy.allows("http://host.docker.internal:3000"));
+    }
+
+    #[test]
+    fn cors_allows_configured_origin() {
+        let policy = CorsPolicy {
+            allow_all: false,
+            origins: vec!["http://host.docker.internal:3000".to_string()],
+        };
+        assert!(policy.allows("http://host.docker.internal:3000"));
+        // Still localhost, still rejected-elsewhere.
+        assert!(policy.allows("http://localhost:3000"));
+        assert!(!policy.allows("https://evil.example.com"));
+    }
+
+    #[test]
+    fn cors_allow_all_echoes_any_origin() {
+        let policy = CorsPolicy {
+            allow_all: true,
+            origins: vec![],
+        };
+        assert!(policy.allows("https://anything.example.com"));
+        assert!(policy.allows("http://localhost:3000"));
+    }
+
+    // ---- Phase 16B: check_api_key ----
+
+    #[test]
+    fn auth_passes_when_no_key_configured() {
+        assert!(check_api_key(None, None));
+        assert!(check_api_key(None, Some("Bearer whatever")));
+    }
+
+    #[test]
+    fn auth_requires_matching_bearer_when_key_set() {
+        assert!(check_api_key(Some("sk-secret"), Some("Bearer sk-secret")));
+        assert!(!check_api_key(Some("sk-secret"), Some("Bearer wrong")));
+        assert!(!check_api_key(Some("sk-secret"), Some("sk-secret"))); // no Bearer prefix
+        assert!(!check_api_key(Some("sk-secret"), None));
+        assert!(!check_api_key(Some("sk-secret"), Some("")));
+    }
+
+    // ---- Phase 16D: stream_options + usage chunk ----
+
+    #[test]
+    fn stream_options_include_usage_parses() {
+        let body: ChatCompletionsReqBody = serde_json::from_value(json!({
+            "model": "default",
+            "messages": [],
+            "stream": true,
+            "stream_options": { "include_usage": true },
+        }))
+        .unwrap();
+        assert!(body.stream_options.unwrap().include_usage);
+    }
+
+    #[test]
+    fn stream_options_absent_defaults_to_none() {
+        let body: ChatCompletionsReqBody = serde_json::from_value(json!({
+            "model": "default",
+            "messages": [],
+            "stream": true,
+        }))
+        .unwrap();
+        assert!(body.stream_options.is_none());
+    }
+
+    #[test]
+    fn usage_frame_is_openai_shaped() {
+        let usage = json!({
+            "prompt_tokens": 12,
+            "completion_tokens": 5,
+            "total_tokens": 17,
+            "cost_usd": 0.0001,
+        });
+        let frame = create_usage_frame("chatcmpl-x", "gpt-test", 42, &usage);
+        let bytes = frame.into_data().expect("data frame");
+        let text = String::from_utf8(bytes.to_vec()).unwrap();
+        // SSE framing.
+        assert!(text.starts_with("data: "));
+        assert!(text.ends_with("\n\n"));
+        let payload: Value = serde_json::from_str(text.trim_start_matches("data: ").trim()).unwrap();
+        assert_eq!(payload["object"], "chat.completion.chunk");
+        assert_eq!(payload["choices"], json!([]));
+        assert_eq!(payload["usage"]["total_tokens"], 17);
+        assert_eq!(payload["usage"]["cost_usd"], 0.0001);
     }
 }

@@ -81,7 +81,12 @@ right_prompt:
   '{color.purple}{?session {?consume_tokens {consume_tokens}({consume_percent}%)}{!consume_tokens {consume_tokens}}}{color.reset}'
 
 # ---- misc ----
-serve_addr: 127.0.0.1:8000                  # Server listening address 
+serve_addr: 127.0.0.1:8000                  # Server listening address
+# serve_api_key: sk-my-secret-key           # If set, every request needs `Authorization: Bearer <key>` (except OPTIONS and GET /health)
+# serve_cors_origins:                       # Cross-origin allowlist (localhost is always allowed)
+#   - http://localhost:3000
+#   - http://host.docker.internal:3000
+# serve_cors_allow_all: false               # On trusted networks, echo any request Origin instead of using the allowlist
 user_agent: null                            # Set User-Agent HTTP header, use `auto` for aichat/<current-version>
 save_shell_history: true                    # Whether to save shell execution command to the history file
 # URL to sync model changes from, e.g., https://cdn.jsdelivr.net/gh/sigoden/aichat@main/models.yaml

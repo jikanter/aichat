@@ -243,6 +243,20 @@ pub struct Config {
     pub right_prompt: Option<String>,
 
     pub serve_addr: Option<String>,
+    /// Phase 16A: cross-origin policy for `--serve`. When set, these origins
+    /// are allowed in addition to localhost (which is always allowed for the
+    /// bundled playground/arena). `serve_cors_allow_all` overrides the list
+    /// and echoes any origin — only safe on trusted networks.
+    #[serde(default)]
+    pub serve_cors_origins: Option<Vec<String>>,
+    #[serde(default)]
+    pub serve_cors_allow_all: bool,
+    /// Phase 16B: optional bearer-token gate for `--serve`. When set, every
+    /// request except `OPTIONS` preflight and `GET /health` must carry
+    /// `Authorization: Bearer <serve_api_key>`. When unset, no auth (the
+    /// historical localhost-only behavior).
+    #[serde(default)]
+    pub serve_api_key: Option<String>,
     pub user_agent: Option<String>,
     pub save_shell_history: bool,
     pub sync_models_url: Option<String>,
@@ -421,6 +435,9 @@ impl Default for Config {
             right_prompt: None,
 
             serve_addr: None,
+            serve_cors_origins: None,
+            serve_cors_allow_all: false,
+            serve_api_key: None,
             user_agent: None,
             save_shell_history: true,
             sync_models_url: None,
@@ -3150,6 +3167,25 @@ impl Config {
 
         if let Some(v) = read_env_value::<String>(&get_env_name("serve_addr")) {
             self.serve_addr = v;
+        }
+        if let Some(v) = read_env_value::<String>(&get_env_name("serve_api_key")) {
+            self.serve_api_key = v;
+        }
+        if let Some(Some(v)) = read_env_bool(&get_env_name("serve_cors_allow_all")) {
+            self.serve_cors_allow_all = v;
+        }
+        if let Ok(raw) = env::var(get_env_name("serve_cors_origins")) {
+            // Comma-separated list, e.g. AICHAT_SERVE_CORS_ORIGINS="http://a,http://b".
+            let origins: Vec<String> = raw
+                .split(',')
+                .map(|s| s.trim().to_string())
+                .filter(|s| !s.is_empty())
+                .collect();
+            self.serve_cors_origins = if origins.is_empty() {
+                None
+            } else {
+                Some(origins)
+            };
         }
         if let Some(v) = read_env_value::<String>(&get_env_name("user_agent")) {
             self.user_agent = v;

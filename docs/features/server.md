@@ -25,6 +25,93 @@ The server exposes the OpenAI-compatible surface (`/v1/chat/completions`,
 and the browser [playground](playground.md)/arena. See
 [`src/serve.rs`](../../src/serve.rs).
 
+## Production hardening
+
+By default the server is localhost-only and unauthenticated — the right
+choice for a developer machine. A few opt-in config keys make it safe to put
+behind a reverse proxy or expose to a Docker bridge network. None of them
+change the default behavior when unset.
+
+### CORS (`serve_cors_origins`, `serve_cors_allow_all`)
+
+Localhost origins are always allowed (the bundled playground/arena are
+same-origin). To let another origin — e.g. an OpenWebUI dev server or a
+container on `host.docker.internal` — call the API from a browser, list it:
+
+```yaml
+serve_cors_origins:
+  - http://localhost:3000
+  - http://host.docker.internal:3000
+```
+
+On a fully trusted network you can echo *any* origin instead:
+
+```yaml
+serve_cors_allow_all: true   # reflects the request Origin on every response
+```
+
+Requests from an origin that is neither localhost nor listed receive no
+`Access-Control-Allow-Origin` header, so the browser blocks the cross-origin
+read — exactly as before this knob existed.
+
+### Bearer-token auth (`serve_api_key`)
+
+```yaml
+serve_api_key: sk-my-secret-key
+```
+
+When set, every request must carry `Authorization: Bearer sk-my-secret-key`
+or it gets **401**. Two routes are deliberately exempt:
+
+- `OPTIONS` preflight (it can't carry credentials), and
+- `GET /health` (orchestration probes must work without a key).
+
+The `/v1/state/*` bridge keeps its own `AICHAT_BRIDGE_TOKEN` gate and is not
+affected by `serve_api_key`. This is a single static token, not a user
+system — for multi-user auth, front the server with nginx or a gateway.
+
+### Health probe (`GET /health`)
+
+```bash
+curl http://127.0.0.1:8000/health
+# {"status":"ok","models":42,"roles":15}
+```
+
+Unauthenticated and dependency-free — suitable for Docker `HEALTHCHECK`,
+Kubernetes liveness/readiness, or a systemd watchdog. `models` counts the
+provider models in `/v1/models` (the `role:*` virtual models are excluded);
+`roles` counts the roles currently served.
+
+### Hot reload (`POST /v1/reload`)
+
+```bash
+curl -X POST http://127.0.0.1:8000/v1/reload
+# {"roles":15,"models":42}
+```
+
+Re-reads role, prompt, and RAG files from disk so role-authoring edits take
+effect without a restart. Provider `clients:` changes in `config.yaml` still
+require a restart (the model wiring is fixed at boot). Subject to
+`serve_api_key` when configured.
+
+### Streaming usage (`stream_options.include_usage`)
+
+`/v1/chat/completions` follows OpenAI's convention: pass
+`"stream_options": {"include_usage": true}` and the stream ends with a
+usage-only chunk (`choices: []`) carrying token counts plus aichat's
+`cost_usd`, right before `data: [DONE]`:
+
+```json
+data: {"choices":[],"usage":{"prompt_tokens":892,"completion_tokens":341,"total_tokens":1233,"cost_usd":0.012}}
+```
+
+aichat asks the upstream provider for the same usage block, so accuracy
+depends on the provider reporting it during streaming; when it doesn't, the
+token counts fall back to `0`. Without `include_usage`, the stream is byte-for-byte
+what it was before (no extra chunk). The non-streaming response and the
+`/v1/roles/{name}/invoke` endpoints already report cost via the
+`X-AIChat-Cost-USD` header (Phase 16H).
+
 ## The bridge surface (`/v1/state/*`)
 
 On top of the public API the server has a **bridge**: a small set of
@@ -128,6 +215,9 @@ touched even by a probe, or to force an isolated server per launch.
 | `AICHAT_BRIDGE_TOKEN` | server start; REPL launch | Shared bridge secret. Unset → fresh per-launch token, no reuse. Exported → enables a shared, reusable server. |
 | `AICHAT_NO_SERVER_PROBE` | REPL launch | When set, skip the 8000–9000 probe; always start a private in-process server. |
 | `AICHAT_KEEP_PI_STAGE` | REPL exit | When set, keep the staged `aichat-bridge.js` instead of cleaning it up. |
+| `AICHAT_SERVE_API_KEY` | server start | Overrides `serve_api_key:`. Sets the public bearer token (Phase 16B). |
+| `AICHAT_SERVE_CORS_ALLOW_ALL` | server start | Overrides `serve_cors_allow_all:` (`true`/`false`). |
+| `AICHAT_SERVE_CORS_ORIGINS` | server start | Overrides `serve_cors_origins:`. Comma-separated list of allowed origins. |
 
 ## Troubleshooting
 
