@@ -318,7 +318,7 @@
   <line x1="900" y1="1106" x2="900" y2="1142" stroke="#3c4043" stroke-width="1.6" marker-end="url(#arrow)"/>
   <!-- core to external tools/MCP (left bus) -->
   <polyline points="40,560 18,560 18,1175 40,1175" fill="none" stroke="#5f6368" stroke-width="1.4" marker-end="url(#arrow)"/>
-  <polyline points="18,1175 18,1184 550,1184 550,1142" fill="none" stroke="#5f6368" stroke-width="1.4" marker-end="url(#arrow)"/>
+  <polyline points="18,1120 18,1120 550,1120 550,1142" fill="none" stroke="#5f6368" stroke-width="1.4" marker-end="url(#arrow)"/>
   <text x="34" y="900" font-size="9.5" fill="#5f6368" transform="rotate(-90 34 900)">tools &#183; agents &#183; MCP servers</text>
   <!-- caching to shared back tier (right sliver, dashed red) -->
   <polyline points="1410,810 1422,810 1422,1184 1410,1184" fill="none" stroke="#ea4335" stroke-width="1.5" stroke-dasharray="6 4" marker-end="url(#arrowR)"/>
