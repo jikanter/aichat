@@ -3,8 +3,7 @@
 **Status (2026-05-29):** **Done.** All four items shipped. User docs:
 [features/authoring.md](../features/authoring.md). Tests:
 `tests/integration/authoring.sh` (12 bats cases) plus unit tests in
-`src/config/role.rs` (`schema_field_diff`, `format_field_set`) and `src/pipe.rs`
-(`format_stage_input_mismatch`).
+`src/config/role.rs`.
 
 | Item | Description | Status |
 |---|---|---|
@@ -15,23 +14,27 @@
 
 **Files touched:**
 - `src/cli.rs` — `--fork-role` (2-arg) and `--explain-role` flags.
-- `src/main.rs` — `run_fork_role` / `build_fork_role_content`,
-  `run_explain_role` / `print_role_explanation` / `print_pipeline_node`;
-  both wired into the `info_flag` short-circuit set and dispatched in `run()`.
-- `src/config/role.rs` — `schema_field_diff` + `format_field_set` (13B field diff).
-- `src/pipe.rs` — `format_stage_input_mismatch`, called from `run_stage_inner`
+- `src/main.rs` — `run_fork_role` and `run_explain_role`, wired into the
+  `info_flag` short-circuit set and dispatched in `run()`.
+- `src/config/role.rs` — `render_forked_role` + `read_role_raw_metadata` (13A),
+  `format_pipeline_input_schema_error` (13B), and `RoleExplanation` /
+  `build_role_explanation` / `format_role_explanation` (13D).
+- `src/pipe.rs` — `run_stage_inner` calls `format_pipeline_input_schema_error`
   when a stage's input schema rejects the prior stage's output (`stage_index`
   threaded through `run_stage` → `run_stage_inner`).
-- `assets/roles/guardrail-{pii,injection,topic}.md` — embedded example roles.
+- `assets/roles/guardrail-{pii,injection,topic}.md` — embedded example roles (13C).
 
 **Notes for future work:**
-- 13B's cross-stage "Stage N produced / Stage N+1 expects" framing fires on the
-  *input-schema* boundary (the genuine producer→consumer mismatch). A stage's
-  own *output-schema* failure still uses the terse validator message; enriching
-  that path is a natural follow-on if it proves useful.
-- The teaching error keeps the literal phrase `Schema input validation failed`
-  so `classify_error` still maps it to the schema-validation family before the
-  pipeline wrapper re-tags it as a `PipelineStage` error.
+- 13B fires on the *input-schema* boundary (the genuine producer→consumer
+  mismatch): it shows what the upstream stage produced vs. what the consumer
+  expects, plus the missing/extra field delta when the producer emitted a JSON
+  object. A stage's own *output-schema* failure still uses the terse validator
+  message; enriching that path is a natural follow-on.
+- The teaching error embeds the underlying "Schema input validation failed"
+  message so `classify_error` still maps it to the schema-validation family
+  before the pipeline wrapper re-tags it as a `PipelineStage` error.
+- The guardrail examples leave `model:` commented out so they run on the user's
+  default model; a comment notes a cheap/local model suffices.
 
 **13A Design — Fork Role:**
 

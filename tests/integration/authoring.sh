@@ -70,14 +70,14 @@ teardown() {
 @test "fork-role: unknown source fails" {
   run "$AICHAT_BIN" --fork-role phase13-does-not-exist phase13-fork
   [ "$status" -ne 0 ]
-  [[ "$output" == *"unknown role"* ]]
+  [[ "$output" == *"could not be resolved"* ]]
 }
 
 @test "fork-role: -o json reports the created path" {
   run "$AICHAT_BIN" --fork-role phase13-base phase13-fork-json -o json
   [ "$status" -eq 0 ]
-  [[ "$output" == *'"extends": "phase13-base"'* ]]
-  [[ "$output" == *'"name": "phase13-fork-json"'* ]]
+  [[ "$output" == *'"source": "phase13-base"'* ]]
+  [[ "$output" == *'"new_name": "phase13-fork-json"'* ]]
 }
 
 @test "fork-role: forked role resolves and inherits the parent" {
@@ -85,7 +85,7 @@ teardown() {
   [ "$status" -eq 0 ]
   run "$AICHAT_BIN" --explain-role phase13-fork
   [ "$status" -eq 0 ]
-  [[ "$output" == *"extends \`phase13-base\`"* ]]
+  [[ "$output" == *"extends: phase13-base"* ]]
 }
 
 # ----- 13D: --explain-role -----
@@ -94,16 +94,15 @@ teardown() {
   run "$AICHAT_BIN" --explain-role phase13-base
   [ "$status" -eq 0 ]
   [[ "$output" == *"Role: phase13-base"* ]]
-  [[ "$output" == *"Composition:"* ]]
-  [[ "$output" == *"capabilities: analysis"* ]]
-  [[ "$output" == *"Invoke:"* ]]
+  [[ "$output" == *"capabilities: [analysis]"* ]]
+  [[ "$output" == *"in: "* ]]
 }
 
 @test "explain-role: -o json has composition keys" {
   run "$AICHAT_BIN" --explain-role phase13-needs-shape -o json
   [ "$status" -eq 0 ]
   [[ "$output" == *'"input": "json{content, language}"'* ]]
-  [[ "$output" == *'"is_pipeline": false'* ]]
+  [[ "$output" == *'"has_pipeline": false'* ]]
 }
 
 @test "explain-role: unknown role fails" {
@@ -139,10 +138,13 @@ teardown() {
 # ----- 13B: schema-mismatch teaching error -----
 
 @test "teaching-error: pipeline input mismatch shows the field delta and hint" {
-  run "$AICHAT_BIN" --pipe --stage phase13-needs-shape "just plain prose, not json"
+  # Feed a JSON object with the wrong shape so the producer→consumer field
+  # delta is computable (missing + extra).
+  run "$AICHAT_BIN" --pipe --stage phase13-needs-shape '{"text":"x","summary":"y"}'
   [ "$status" -ne 0 ]
   [[ "$output" == *"Schema input validation failed"* ]]
   [[ "$output" == *"Stage 1 expects"* ]]
   [[ "$output" == *"Missing fields: content, language"* ]]
-  [[ "$output" == *"hint:"* ]]
+  [[ "$output" == *"Extra fields: text, summary"* ]]
+  [[ "$output" == *"--fork-role"* ]]
 }

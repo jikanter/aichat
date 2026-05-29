@@ -87,16 +87,16 @@ async fn main() -> Result<()> {
         || cli.list_models
         || cli.list_roles
         || cli.find_role
-        // Phase 13A/13D: authoring/teaching commands are read-only-ish (fork
-        // writes one file, explain only reads) and don't need a heavy config.
-        || !cli.fork_role.is_empty()
-        || cli.explain_role.is_some()
         || cli.list_prompts
         || cli.list_agents
         || cli.list_rags
         || cli.list_macros
         || cli.list_sessions
         || cli.list_tools
+        // Phase 13A/D: --fork-role writes a file and exits; --explain-role
+        // reads role frontmatter and exits. Neither needs an LLM client.
+        || !cli.fork_role.is_empty()
+        || cli.explain_role.is_some()
         // Phase 25E/26E: read-only knowledge ops don't need heavy config setup.
         || cli.knowledge_list
         || cli.knowledge_stat.is_some()
@@ -219,6 +219,18 @@ async fn run(config: GlobalConfig, mut cli: Cli, text: Option<String>) -> Result
         render_role_list(&roles, cli.verbose, cli.output_format)?;
         return Ok(());
     }
+    // Phase 13A: --fork-role <SOURCE> <NEW_NAME>. Creates a new role file in
+    // the user's roles directory pre-populated with `extends: <SOURCE>` and
+    // commented-out parent fields so the user can edit them in place.
+    if !cli.fork_role.is_empty() {
+        return run_fork_role(&cli.fork_role, cli.output_format);
+    }
+    // Phase 13D: --explain-role <NAME>. Prints a human-readable description
+    // of what the role does and how it composes. Pair with `-o json` for
+    // machine consumption.
+    if let Some(name) = &cli.explain_role {
+        return run_explain_role(name, cli.output_format);
+    }
     if cli.find_role {
         // At least one filter must be present, otherwise --find-role is just a
         // less-friendly --list-roles.
@@ -245,16 +257,6 @@ async fn run(config: GlobalConfig, mut cli: Cli, text: Option<String>) -> Result
         }
         render_role_list(&roles, cli.verbose, cli.output_format)?;
         return Ok(());
-    }
-    // Phase 13A: fork a role into a new `extends:` file.
-    if !cli.fork_role.is_empty() {
-        let source = &cli.fork_role[0];
-        let new_name = &cli.fork_role[1];
-        return run_fork_role(source, new_name, cli.output_format);
-    }
-    // Phase 13D: explain how a role composes.
-    if let Some(name) = &cli.explain_role {
-        return run_explain_role(name, cli.output_format);
     }
     if cli.list_prompts {
         if matches!(cli.output_format, Some(crate::cli::OutputFormat::Json)) {
@@ -1262,226 +1264,88 @@ fn render_role_list(
     Ok(())
 }
 
-/// Phase 13A: fork an existing role into a new file that `extends:` it. Turns
-/// a multi-minute "copy the frontmatter, remember `extends`, comment out the
-/// overrides" task into one command — and teaches that `extends` exists.
-/// Writes `roles/<new_name>.md`; refuses to clobber an existing role.
-fn run_fork_role(
-    source: &str,
-    new_name: &str,
-    output_format: Option<crate::cli::OutputFormat>,
-) -> Result<()> {
-    // The new name becomes a filename — keep it a bare role name.
-    if new_name.is_empty()
-        || new_name.contains('/')
-        || new_name.contains('\\')
-        || new_name.contains(std::path::MAIN_SEPARATOR)
-    {
-        bail!("Invalid role name '{new_name}': use a bare name with no path separators");
+/// Phase 13A: create a new role file that inherits from `SOURCE`.
+///
+/// The new file ships with `extends: SOURCE` plus a hint comment per
+/// field the parent declares (model, temperature, top_p, use_tools,
+/// input_schema, output_schema). The user uncomments the line they want
+/// to override — a 5-minute editing task collapses to a 5-second command,
+/// and the user picks up that `extends:` exists on the way.
+fn run_fork_role(args: &[String], output_format: Option<crate::cli::OutputFormat>) -> Result<()> {
+    if args.len() != 2 {
+        bail!("--fork-role takes exactly two values: <SOURCE> <NEW_NAME>");
+    }
+    let source = &args[0];
+    let new_name = &args[1];
+
+    if new_name.trim().is_empty() {
+        bail!("--fork-role: new name must not be empty");
+    }
+    // Same constraints `Config::role_file` would otherwise paper over —
+    // refuse path traversal so the new file always lands in `roles_dir`.
+    if new_name.contains('/') || new_name.contains('\\') || new_name.starts_with('.') {
+        bail!(
+            "--fork-role: invalid new role name '{new_name}' — must be a bare role name with no path separators or leading dot"
+        );
     }
 
-    // The source must resolve (this also walks `extends`/`include`, so forking
-    // a role that points at a missing parent fails here rather than at run time).
-    let source_role = config::Role::resolve(source)
-        .with_context(|| format!("Cannot fork unknown role '{source}'"))?;
+    // Resolve the source to validate it. If this fails the user gets a
+    // helpful "unknown role" error before any file is created.
+    let _resolved = config::Role::resolve(source)
+        .with_context(|| format!("--fork-role: source role '{source}' could not be resolved"))?;
 
-    let target_path = Config::role_file(new_name);
+    let target_path = config::Config::role_file(new_name);
     if target_path.exists() {
         bail!(
-            "Role '{new_name}' already exists at {} — pick another name",
+            "--fork-role: target file {} already exists — pick a different NEW_NAME or remove the existing file",
             target_path.display()
         );
     }
+    if let Some(parent_dir) = target_path.parent() {
+        std::fs::create_dir_all(parent_dir).with_context(|| {
+            format!("--fork-role: failed to create roles directory {}", parent_dir.display())
+        })?;
+    }
 
-    let content = build_fork_role_content(source, &source_role);
-    ensure_parent_exists(&target_path)?;
-    std::fs::write(&target_path, &content)
-        .with_context(|| format!("Failed to write role to {}", target_path.display()))?;
+    let parent_metadata = config::read_role_raw_metadata(source)
+        .with_context(|| format!("--fork-role: failed to read parent metadata for '{source}'"))?;
+    let body = config::render_forked_role(source, &parent_metadata);
+    std::fs::write(&target_path, &body)
+        .with_context(|| format!("--fork-role: failed to write {}", target_path.display()))?;
 
-    if matches!(output_format, Some(crate::cli::OutputFormat::Json)) {
-        let json = serde_json::json!({
-            "created": target_path.display().to_string(),
-            "name": new_name,
-            "extends": source,
-        });
-        println!("{}", serde_json::to_string_pretty(&json)?);
-    } else {
-        println!("Created {}:", target_path.display());
-        println!();
-        for line in content.lines() {
-            println!("  {line}");
+    match output_format {
+        Some(crate::cli::OutputFormat::Json) => {
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&serde_json::json!({
+                    "source": source,
+                    "new_name": new_name,
+                    "path": target_path.display().to_string(),
+                }))?
+            );
         }
-        println!();
-        println!("Edit the file, then run:  aichat -r {new_name} \"your input\"");
+        _ => {
+            println!("Created {}", target_path.display());
+            println!("  extends: {source}");
+            println!("  Uncomment the fields you want to override, then edit the prompt body.");
+        }
     }
     Ok(())
 }
 
-/// Phase 13A: assemble the body of a forked role. Pre-populates `extends:` and
-/// comments out the fields a fork most often overrides, seeded with the
-/// parent's actual values as hints so the user can see what they're inheriting.
-fn build_fork_role_content(source: &str, source_role: &config::Role) -> String {
-    let model_hint = source_role.model_id().unwrap_or("provider:model-id");
-    let temp_hint = source_role
-        .temperature()
-        .map(|t| t.to_string())
-        .unwrap_or_else(|| "0.7".to_string());
-    format!(
-        "---\n\
-         extends: {source}\n\
-         # model: {model_hint}        # override the parent's model\n\
-         # temperature: {temp_hint}        # override the parent's temperature\n\
-         # output_schema:           # override the parent's output schema\n\
-         ---\n\
-         # Add your prompt additions here. The parent prompt is inherited.\n"
-    )
-}
-
-/// Phase 13D: print a human-readable explanation of what a role does and how
-/// it composes. Reads only — never runs the role. Honors `-o json`.
+/// Phase 13D: print a human-readable explanation of a role's composition.
 fn run_explain_role(name: &str, output_format: Option<crate::cli::OutputFormat>) -> Result<()> {
-    let role = config::Role::resolve(name).with_context(|| format!("Unknown role '{name}'"))?;
-
-    if matches!(output_format, Some(crate::cli::OutputFormat::Json)) {
-        let tools = split_use_tools(role.use_tools().as_deref());
-        let pipeline: Vec<serde_json::Value> = role
-            .pipeline_all_stages()
-            .iter()
-            .map(|s| {
-                serde_json::json!({
-                    "role": s.role,
-                    "model": s.model.clone().unwrap_or_else(|| "(default model)".to_string()),
-                })
-            })
-            .collect();
-        let json = serde_json::json!({
-            "name": role.name(),
-            "description": role.description_or_derived(),
-            "extends": role.extends(),
-            "includes": role.include(),
-            "model": role.model_id(),
-            "tools": tools,
-            "input": role.port_input_summary(),
-            "output": role.port_output_summary(),
-            "capabilities": role.capabilities(),
-            "pipe_to": role.pipe_to(),
-            "save_to": role.save_to(),
-            "is_pipeline": role.is_pipeline(),
-            "pipeline": pipeline,
-        });
-        println!("{}", serde_json::to_string_pretty(&json)?);
-        return Ok(());
+    let exp = config::build_role_explanation(name)
+        .with_context(|| format!("--explain-role: failed to resolve role '{name}'"))?;
+    match output_format {
+        Some(crate::cli::OutputFormat::Json) => {
+            println!("{}", serde_json::to_string_pretty(&exp)?);
+        }
+        _ => {
+            print!("{}", config::format_role_explanation(&exp));
+        }
     }
-
-    print_role_explanation(&role);
     Ok(())
-}
-
-/// Split a `use_tools` string into trimmed, non-empty tool names.
-fn split_use_tools(use_tools: Option<&str>) -> Vec<String> {
-    use_tools
-        .unwrap_or("")
-        .split(',')
-        .map(|s| s.trim())
-        .filter(|s| !s.is_empty())
-        .map(|s| s.to_string())
-        .collect()
-}
-
-/// Phase 13D: render the human-readable `--explain-role` block to stdout.
-fn print_role_explanation(role: &config::Role) {
-    println!("Role: {}", role.name());
-    let desc = role.description_or_derived();
-    if !desc.is_empty() {
-        println!("  {desc}");
-    }
-    println!();
-    println!("Composition:");
-    if let Some(parent) = role.extends() {
-        println!("  • extends `{parent}` — inherits its prompt and settings");
-    }
-    if !role.include().is_empty() {
-        println!(
-            "  • includes: {} — their prompts are prepended",
-            role.include().join(", ")
-        );
-    }
-    match role.model_id() {
-        Some(model) => println!("  • model: {model}"),
-        None => println!("  • model: (inherits the session/global default)"),
-    }
-    let tools = split_use_tools(role.use_tools().as_deref());
-    if !tools.is_empty() {
-        println!("  • tools: {} ({})", tools.join(", "), tools.len());
-    }
-    println!("  • input port:  {}", role.port_input_summary());
-    println!("  • output port: {}", role.port_output_summary());
-    if !role.capabilities().is_empty() {
-        println!("  • capabilities: {}", role.capabilities().join(", "));
-    }
-    if let Some(cmd) = role.pipe_to() {
-        println!("  • pipe_to: {cmd}");
-    }
-    if let Some(path) = role.save_to() {
-        println!("  • save_to: {path}");
-    }
-
-    if role.is_pipeline() {
-        if let Some(nodes) = role.pipeline() {
-            let n = nodes.len();
-            let label = if role.pipeline_has_dag() { "node" } else { "stage" };
-            println!();
-            println!(
-                "Pipeline ({n} {label}{}):",
-                if n == 1 { "" } else { "s" }
-            );
-            for (i, node) in nodes.iter().enumerate() {
-                print_pipeline_node(node, i + 1, 0);
-            }
-        }
-    }
-
-    println!();
-    println!("Invoke:");
-    println!("  aichat -r {} \"your input\"", role.name());
-}
-
-/// Phase 13D: stdout twin of `render_pipeline_node` (which targets stderr for
-/// the `--dry-run` preview). `--explain-role` is itself the command's primary
-/// output, so its pipeline tree belongs on stdout with the rest of the block.
-fn print_pipeline_node(node: &config::PipelineNode, index: usize, depth: usize) {
-    let indent = "  ".repeat(depth + 1);
-    match node {
-        config::PipelineNode::Stage(s) => {
-            let model = s.model.as_deref().unwrap_or("(default model)");
-            println!("{indent}{index}. {} ({model})", s.role);
-        }
-        config::PipelineNode::Parallel(p) => {
-            let merge = match &p.merge {
-                config::MergeStrategy::Concatenate => "concatenate".to_string(),
-                config::MergeStrategy::JsonArray => "json_array".to_string(),
-                config::MergeStrategy::CustomRole(r) => format!("custom_role: {r}"),
-            };
-            println!(
-                "{indent}{index}. parallel ({} branches, merge: {merge})",
-                p.branches.len()
-            );
-            for (bi, b) in p.branches.iter().enumerate() {
-                print_pipeline_node(b, bi + 1, depth + 1);
-            }
-        }
-        config::PipelineNode::Switch(s) => {
-            println!("{indent}{index}. switch ({} branches)", s.branches.len());
-            for (bi, b) in s.branches.iter().enumerate() {
-                let kind = match &b.predicate {
-                    Some(_) => "when",
-                    None => "otherwise",
-                };
-                println!("{indent}  {}. ({kind})", bi + 1);
-                print_pipeline_node(&b.node, bi + 1, depth + 2);
-            }
-        }
-    }
 }
 
 fn setup_logger(is_serve: bool) -> Result<()> {

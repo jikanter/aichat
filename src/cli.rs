@@ -241,6 +241,21 @@ pub struct Cli {
     /// List all roles
     #[clap(long)]
     pub list_roles: bool,
+    /// Phase 13A: create a new role that `extends:` an existing one. Writes
+    /// `<roles_dir>/<NEW_NAME>.md` with parent-override hints commented out
+    /// and the parent prompt body inherited via the extends chain.
+    #[clap(
+        long = "fork-role",
+        value_names = ["SOURCE", "NEW_NAME"],
+        num_args = 2,
+    )]
+    pub fork_role: Vec<String>,
+    /// Phase 13D: print a human-readable description of a role — what it
+    /// does, how it composes (extends/include/pipeline/ports/capabilities),
+    /// and where the source file lives. Pair with `-o json` for machine
+    /// consumption.
+    #[clap(long = "explain-role", value_name = "NAME")]
+    pub explain_role: Option<String>,
     /// Phase 14D: search roles by capability tag and/or port type. Combine
     /// with `--capability`, `--accepts`, and/or `--produces` to filter.
     #[clap(long = "find-role")]
@@ -261,16 +276,6 @@ pub struct Cli {
     /// in `--list-roles` / `--find-role` output.
     #[clap(long)]
     pub verbose: bool,
-    /// Phase 13A: fork an existing role into a new `extends:` file. Takes the
-    /// source role and the new role name; writes `roles/<NEW_NAME>.md` with a
-    /// pre-populated `extends:` line and commented-out overridable fields.
-    #[clap(long = "fork-role", value_names = ["SOURCE", "NEW_NAME"], num_args = 2)]
-    pub fork_role: Vec<String>,
-    /// Phase 13D: print a human-readable explanation of what a role does and
-    /// how it composes (extends/include, model, tools, ports, pipeline,
-    /// capabilities). Honors `-o json` for a machine-readable view.
-    #[clap(long = "explain-role", value_name = "NAME")]
-    pub explain_role: Option<String>,
     /// List all prompts
     #[clap(long)]
     pub list_prompts: bool,
