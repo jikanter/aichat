@@ -1361,8 +1361,10 @@ impl Config {
 
     pub fn retrieve_role(&self, name: &str) -> Result<Role> {
         let mut role = Role::resolve(name)?;
-        // Apply role variables before model interpolation
-        if !role.variables().is_empty() {
+        // Apply role input slots before model interpolation. Phase 33 unified the
+        // legacy `variables:` block and `input_schema:` defaults into one slot
+        // map, so a role with either channel resolves here.
+        if !role.variables().is_empty() || role.input_schema().is_some() {
             let resolved = self.resolve_role_variables(&role)?;
             role.apply_variables(&resolved);
         }
@@ -1407,35 +1409,24 @@ impl Config {
         Ok(role)
     }
 
+    /// Phase 33: resolve a role's input slots from both declared channels
+    /// (`variables:` + `input_schema:` defaults) into one rendered map. The
+    /// merge/precedence/rendering logic lives in [`role::resolve_slots`]; this
+    /// wrapper supplies the CLI `-v` overrides and emits the Phase 33E nudge
+    /// when a role declares both channels at once.
     fn resolve_role_variables(&self, role: &Role) -> Result<IndexMap<String, String>> {
-        let mut output = IndexMap::new();
-        for var in role.variables() {
-            // CLI -v flag takes precedence over defaults (including shell defaults)
-            let value = self
-                .role_variables
-                .as_ref()
-                .and_then(|vars| vars.get(&var.name))
-                .cloned()
-                .or_else(|| {
-                    // Phase 6A: Resolve default, which may be a shell command
-                    var.default.as_ref().and_then(|d| match d.resolve() {
-                        Ok(v) => Some(v),
-                        Err(e) => {
-                            warn!("Shell variable '{}' failed: {e}", var.name);
-                            None
-                        }
-                    })
-                })
-                .ok_or_else(|| {
-                    anyhow!(
-                        "Role variable '{}' is required but not provided (use -v {}=VALUE)",
-                        var.name,
-                        var.name
-                    )
-                })?;
-            output.insert(var.name.clone(), value);
+        if role.input_schema().is_some() && !role.variables().is_empty() {
+            warn!(
+                "role declares both `variables:` and `input_schema:`. The `variables:` \
+                 block is preserved as sugar; declare new slots in `input_schema:` \
+                 directly. See docs/features/typed-input.md."
+            );
         }
-        Ok(output)
+        self::role::resolve_slots(
+            role.variables(),
+            role.input_schema(),
+            self.role_variables.as_ref(),
+        )
     }
 
     pub fn new_role(&mut self, name: &str) -> Result<()> {

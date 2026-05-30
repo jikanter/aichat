@@ -1,14 +1,14 @@
 # Phase 33: Typed Input Surface : Overview - Epic 4
 
-**Status (2026-05-23):** **Planned — design draft.** No items below are implemented. This phase unifies the fragmented input data space (`variables:`, `input_schema:`, `__INPUT__`, `-v`, stdin) into a single typed contract. Extends [Phase 14](phase-14-overview.md) (capability manifests) and [Phase 15](phase-15-overview.md) (contract testing); none of those phases need to land first, but 15B's cross-stage containment check becomes substantially more useful once 33B/33D ship.
+**Status (2026-05-30):** **33A/33B/33E Done** (unification core); **33C/33D Planned.** This phase unifies the fragmented input data space (`variables:`, `input_schema:`, `__INPUT__`, `-v`, stdin) into a single typed contract. Extends [Phase 14](phase-14-overview.md) (capability manifests) and [Phase 15](phase-15-overview.md) (contract testing); none of those phases need to land first, but 15B's cross-stage containment check becomes substantially more useful once 33B/33D ship.
 
 | Item | Description | Status |
 |---|---|---|
-| 33A | `default:` (and `default: { shell: ... }`) per property inside `input_schema:` — schema becomes the source of truth for parameter declarations | Planned |
-| 33B | Type-aware `{{name}}` rendering — list/object/scalar substitution uses the declared schema shape instead of stringly-only `replace()` | Planned |
+| 33A | `default:` (and `default: { shell: ... }`) per property inside `input_schema:` — schema becomes the source of truth for parameter declarations | **Done** |
+| 33B | Type-aware `{{name}}` rendering — list/object/scalar substitution uses the declared schema shape instead of stringly-only `replace()` | **Done** |
 | 33C | CLI / stdin coercion against the schema — `-v key=value` parses to the declared type; one schema property (default `body`) routes from stdin via `x-aichat.source` | Planned |
 | 33D | Preflight shape check between adjacent pipeline stages (extends Phase 15B containment) — strict when both stages declare schemas, soft-warn otherwise | Planned |
-| 33E | Deprecation handling for the `variables:` block — preserved as sugar with a single warning if mixed with `input_schema:` in the same role; no removal date | Planned |
+| 33E | Deprecation handling for the `variables:` block — preserved as sugar with a single warning if mixed with `input_schema:` in the same role; no removal date | **Done** |
 
 ## Background
 
@@ -179,6 +179,43 @@ warn: role 'foo' declares both `variables:` and `input_schema:`. The
 No removal is planned. The block is documented as legacy and `--fork-role` ([Phase 13A](phase-13-overview.md)) emits the new shape.
 
 **Files:** [`src/config/role.rs`](../../src/config/role.rs) (fold `variables` into `input_schema` after parse), `docs/features/typed-input.md` (new user-facing doc).
+
+## Shipped — unification core (2026-05-30)
+
+33A + 33B + 33E landed together as the design's first PR. Demo:
+[`docs/demos/phase-33-typed-input.md`](../demos/phase-33-typed-input.md).
+
+**33A — schema defaults.** `schema_slots()` (`src/config/role.rs`) flattens an
+`input_schema`'s `properties` into `SchemaSlot`s carrying an optional
+`SlotDefault` (`Literal(Value)` or `Shell(String)` — a `default:` object with a
+single `shell:` key), plus `required`/`pretty` flags. A property's default is
+resolved into the `{{slot}}` map; precedence is CLI `-v` > default. A `required:`
+property with no value is **skipped, not errored** here — the schema's existing
+message validation still enforces it, so roles that pass their payload as the
+message keep working unchanged. (Full `-v` type coercion and stdin routing are
+33C.)
+
+**33B — type-aware rendering.** `render_slot(&Value, pretty)` renders scalars
+bare, `null` empty, and arrays/objects as compact JSON (pretty opt-in via
+`x-aichat: { render: pretty }`). Strings pass through unchanged, so existing
+string-only roles render identically. Rendering happens at the resolution
+boundary, so `Role::apply_variables` keeps its `IndexMap<String, String>`
+signature (the typed values are rendered to strings before splicing) — a
+smaller blast radius than changing the splice signature.
+
+**33E — `variables:` folding.** `resolve_slots(variables, input_schema, cli)`
+merges both channels into one rendered map; the schema property wins on a name
+collision (the schema is the source of truth). `Config::resolve_role_variables`
+delegates to it and emits one warning per load when a role declares both blocks.
+`retrieve_role` now resolves slots when **either** channel is present.
+
+**Tests:** 18 unit tests in `src/config/role.rs` (`render_slot` ×6,
+`schema_slots` ×4, `resolve_slots` ×8). Full suite green (602 unit / 197 compat);
+role/authoring bats unchanged.
+
+**Deliberately deferred to 33C/33D:** `-v` values are still strings until 33C
+coerces them against the declared type; stdin still flows to the message (not a
+`body` slot) until 33C; pipeline shape-checking stays soft (Phase 15B) until 33D.
 
 ## Open questions
 

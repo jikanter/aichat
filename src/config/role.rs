@@ -848,6 +848,171 @@ pub struct RoleVariable {
     pub default: Option<VariableDefault>,
 }
 
+/// Phase 33B: render a resolved slot value into the string spliced into the
+/// prompt at `{{name}}`. Scalars render bare (no quotes); arrays and objects
+/// render as compact JSON by default, or pretty-printed when the property is
+/// annotated `x-aichat: { render: pretty }`. `null` renders empty. Strings
+/// pass through unchanged, so existing string-only `variables:` slots render
+/// exactly as they did before this phase.
+pub(crate) fn render_slot(value: &Value, pretty: bool) -> String {
+    match value {
+        Value::String(s) => s.clone(),
+        Value::Null => String::new(),
+        Value::Bool(_) | Value::Number(_) => value.to_string(),
+        Value::Array(_) | Value::Object(_) => {
+            if pretty {
+                serde_json::to_string_pretty(value).unwrap_or_default()
+            } else {
+                serde_json::to_string(value).unwrap_or_default()
+            }
+        }
+    }
+}
+
+/// Phase 33A: a per-property default declared inside an `input_schema`.
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) enum SlotDefault {
+    /// A literal JSON default (`default: "main"`, `default: 3`, `default: [..]`).
+    Literal(Value),
+    /// A shell-injected default (`default: { shell: "date +%F" }`).
+    Shell(String),
+}
+
+/// Phase 33A: one declared parameter slot extracted from an `input_schema`'s
+/// `properties`. `pretty` reflects `x-aichat: { render: pretty }`; `required`
+/// mirrors the schema's `required:` list.
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct SchemaSlot {
+    pub name: String,
+    pub default: Option<SlotDefault>,
+    pub required: bool,
+    pub pretty: bool,
+}
+
+impl SlotDefault {
+    /// Resolve to a concrete JSON value. Literals pass through; shell directives
+    /// run the command and yield its trimmed stdout as a string (reusing
+    /// [`VariableDefault`]'s shell execution).
+    pub(crate) fn resolve(&self) -> anyhow::Result<Value> {
+        match self {
+            SlotDefault::Literal(v) => Ok(v.clone()),
+            SlotDefault::Shell(cmd) => VariableDefault::Shell { shell: cmd.clone() }
+                .resolve()
+                .map(Value::String),
+        }
+    }
+}
+
+/// Phase 33A/33B/33E: fold a role's two declared input channels — the legacy
+/// string-only `variables:` block and the typed `input_schema:` properties —
+/// into one rendered `{{name}} -> string` map.
+///
+/// Precedence per slot: CLI `-v` > declared default. `variables:` keeps today's
+/// semantics exactly, including the hard error when a variable has no value and
+/// no default. `input_schema` properties are **additive**: a property with
+/// neither a CLI value nor a `default:` is left unresolved (skipped) rather than
+/// erroring — the schema's own message validation still enforces `required:`,
+/// so roles that pass their payload as the message (not via `-v`) keep working.
+/// On a name collision the schema property wins (the schema is the source of
+/// truth, Phase 33E). Typed values are rendered with [`render_slot`].
+pub(crate) fn resolve_slots(
+    variables: &[RoleVariable],
+    input_schema: Option<&Value>,
+    cli: Option<&IndexMap<String, String>>,
+) -> anyhow::Result<IndexMap<String, String>> {
+    let mut typed: IndexMap<String, (Value, bool)> = IndexMap::new();
+
+    for var in variables {
+        let value = cli
+            .and_then(|m| m.get(&var.name))
+            .cloned()
+            .or_else(|| {
+                var.default.as_ref().and_then(|d| match d.resolve() {
+                    Ok(v) => Some(v),
+                    Err(e) => {
+                        warn!("Shell variable '{}' failed: {e}", var.name);
+                        None
+                    }
+                })
+            })
+            .ok_or_else(|| {
+                anyhow::anyhow!(
+                    "Role variable '{}' is required but not provided (use -v {}=VALUE)",
+                    var.name,
+                    var.name
+                )
+            })?;
+        typed.insert(var.name.clone(), (Value::String(value), false));
+    }
+
+    if let Some(schema) = input_schema {
+        for slot in schema_slots(schema) {
+            let value: Option<Value> = cli
+                .and_then(|m| m.get(&slot.name))
+                .map(|s| Value::String(s.clone()))
+                .or_else(|| {
+                    slot.default.as_ref().and_then(|d| match d.resolve() {
+                        Ok(v) => Some(v),
+                        Err(e) => {
+                            warn!("Shell default for '{}' failed: {e}", slot.name);
+                            None
+                        }
+                    })
+                });
+            if let Some(v) = value {
+                typed.insert(slot.name.clone(), (v, slot.pretty));
+            }
+        }
+    }
+
+    Ok(typed
+        .into_iter()
+        .map(|(k, (v, pretty))| (k, render_slot(&v, pretty)))
+        .collect())
+}
+
+/// Phase 33A: flatten an `input_schema`'s `properties` into the declared
+/// parameter slots. A `default` that is an object with the single key `shell`
+/// (a string) is read as a shell directive; any other `default` is a literal
+/// JSON value. Returns an empty vec for a schema with no `properties`.
+pub(crate) fn schema_slots(schema: &Value) -> Vec<SchemaSlot> {
+    let props = match schema.get("properties").and_then(Value::as_object) {
+        Some(p) => p,
+        None => return Vec::new(),
+    };
+    let required: std::collections::HashSet<&str> = schema
+        .get("required")
+        .and_then(Value::as_array)
+        .map(|a| a.iter().filter_map(Value::as_str).collect())
+        .unwrap_or_default();
+
+    props
+        .iter()
+        .map(|(name, prop)| {
+            let default = prop.get("default").map(|d| match d.as_object() {
+                Some(obj)
+                    if obj.len() == 1
+                        && obj.get("shell").and_then(Value::as_str).is_some() =>
+                {
+                    SlotDefault::Shell(obj["shell"].as_str().unwrap().to_string())
+                }
+                _ => SlotDefault::Literal(d.clone()),
+            });
+            let pretty = prop
+                .get("x-aichat")
+                .and_then(|x| x.get("render"))
+                .and_then(Value::as_str)
+                == Some("pretty");
+            SchemaSlot {
+                name: name.clone(),
+                default,
+                required: required.contains(name.as_str()),
+                pretty,
+            }
+        })
+        .collect()
+}
+
 #[derive(Debug)]
 struct RawRoleParts {
     metadata: serde_json::Map<String, serde_json::Value>,
@@ -2605,6 +2770,199 @@ fn parse_structure_prompt(prompt: &str) -> (&str, Vec<(&str, &str)>) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use serde_json::json;
+
+    // ---- Phase 33B: type-aware slot rendering ----
+
+    #[test]
+    fn render_slot_string_passes_through_unquoted() {
+        assert_eq!(render_slot(&json!("main"), false), "main");
+    }
+
+    #[test]
+    fn render_slot_scalars_render_bare() {
+        assert_eq!(render_slot(&json!(3), false), "3");
+        assert_eq!(render_slot(&json!(true), false), "true");
+        assert_eq!(render_slot(&json!(1.5), false), "1.5");
+    }
+
+    #[test]
+    fn render_slot_null_is_empty() {
+        assert_eq!(render_slot(&json!(null), false), "");
+    }
+
+    #[test]
+    fn render_slot_array_is_compact_json_by_default() {
+        assert_eq!(render_slot(&json!(["a", "b"]), false), r#"["a","b"]"#);
+    }
+
+    #[test]
+    fn render_slot_object_is_compact_json_by_default() {
+        assert_eq!(render_slot(&json!({"k": 1}), false), r#"{"k":1}"#);
+    }
+
+    #[test]
+    fn render_slot_pretty_expands_arrays() {
+        let out = render_slot(&json!(["a", "b"]), true);
+        assert!(out.contains('\n'), "pretty render should be multi-line: {out}");
+        assert!(out.contains("\"a\""));
+    }
+
+    // ---- Phase 33A: schema slot extraction ----
+
+    fn slot<'a>(slots: &'a [SchemaSlot], name: &str) -> &'a SchemaSlot {
+        slots.iter().find(|s| s.name == name).expect("slot present")
+    }
+
+    #[test]
+    fn schema_slots_empty_without_properties() {
+        assert!(schema_slots(&json!({"type": "object"})).is_empty());
+    }
+
+    #[test]
+    fn schema_slots_reads_literal_defaults_by_type() {
+        let schema = json!({
+            "type": "object",
+            "properties": {
+                "target": { "type": "string", "default": "main" },
+                "depth":  { "type": "integer", "default": 3 },
+                "tags":   { "type": "array", "default": ["a", "b"] }
+            }
+        });
+        let slots = schema_slots(&schema);
+        assert_eq!(slot(&slots, "target").default, Some(SlotDefault::Literal(json!("main"))));
+        assert_eq!(slot(&slots, "depth").default, Some(SlotDefault::Literal(json!(3))));
+        assert_eq!(slot(&slots, "tags").default, Some(SlotDefault::Literal(json!(["a", "b"]))));
+    }
+
+    #[test]
+    fn schema_slots_reads_shell_default() {
+        let schema = json!({
+            "type": "object",
+            "properties": { "today": { "type": "string", "default": { "shell": "date +%F" } } }
+        });
+        let slots = schema_slots(&schema);
+        assert_eq!(slot(&slots, "today").default, Some(SlotDefault::Shell("date +%F".to_string())));
+    }
+
+    #[test]
+    fn schema_slots_marks_required_and_pretty() {
+        let schema = json!({
+            "type": "object",
+            "properties": {
+                "files": { "type": "array", "x-aichat": { "render": "pretty" } },
+                "target": { "type": "string", "default": "main" }
+            },
+            "required": ["files"]
+        });
+        let slots = schema_slots(&schema);
+        let files = slot(&slots, "files");
+        assert!(files.required, "files is required");
+        assert!(files.pretty, "files renders pretty");
+        assert!(files.default.is_none());
+        assert!(!slot(&slots, "target").required);
+    }
+
+    // ---- Phase 33A/33B/33E: resolve_slots (unification core) ----
+
+    fn vars(pairs: &[(&str, &str)]) -> IndexMap<String, String> {
+        pairs.iter().map(|(k, v)| (k.to_string(), v.to_string())).collect()
+    }
+
+    #[test]
+    fn resolve_slots_fills_schema_literal_default() {
+        let schema = json!({
+            "type": "object",
+            "properties": { "target": { "type": "string", "default": "main" } }
+        });
+        let out = resolve_slots(&[], Some(&schema), None).unwrap();
+        assert_eq!(out.get("target").map(String::as_str), Some("main"));
+    }
+
+    #[test]
+    fn resolve_slots_cli_overrides_schema_default() {
+        let schema = json!({
+            "type": "object",
+            "properties": { "target": { "type": "string", "default": "main" } }
+        });
+        let cli = vars(&[("target", "dev")]);
+        let out = resolve_slots(&[], Some(&schema), Some(&cli)).unwrap();
+        assert_eq!(out.get("target").map(String::as_str), Some("dev"));
+    }
+
+    #[test]
+    fn resolve_slots_renders_typed_defaults() {
+        let schema = json!({
+            "type": "object",
+            "properties": {
+                "depth": { "type": "integer", "default": 3 },
+                "tags":  { "type": "array", "default": ["a", "b"] }
+            }
+        });
+        let out = resolve_slots(&[], Some(&schema), None).unwrap();
+        assert_eq!(out.get("depth").map(String::as_str), Some("3"));
+        assert_eq!(out.get("tags").map(String::as_str), Some(r#"["a","b"]"#));
+    }
+
+    #[test]
+    fn resolve_slots_skips_required_property_without_value() {
+        // A required schema property with no default and no -v must NOT error
+        // here — message validation still enforces it. It is simply absent.
+        let schema = json!({
+            "type": "object",
+            "properties": { "files": { "type": "array" } },
+            "required": ["files"]
+        });
+        let out = resolve_slots(&[], Some(&schema), None).unwrap();
+        assert!(!out.contains_key("files"), "unresolved required prop is skipped, not errored");
+    }
+
+    #[test]
+    fn resolve_slots_variable_required_without_value_errors() {
+        let var = RoleVariable { name: "who".into(), default: None };
+        let err = resolve_slots(&[var], None, None).unwrap_err();
+        assert!(err.to_string().contains("required but not provided"), "{err}");
+    }
+
+    #[test]
+    fn resolve_slots_variable_default_and_cli() {
+        let var = RoleVariable {
+            name: "target".into(),
+            default: Some(VariableDefault::Value("main".into())),
+        };
+        let out = resolve_slots(std::slice::from_ref(&var), None, None).unwrap();
+        assert_eq!(out.get("target").map(String::as_str), Some("main"));
+
+        let cli = vars(&[("target", "dev")]);
+        let out = resolve_slots(&[var], None, Some(&cli)).unwrap();
+        assert_eq!(out.get("target").map(String::as_str), Some("dev"));
+    }
+
+    #[test]
+    fn resolve_slots_schema_wins_on_name_collision() {
+        // A variable and a schema property share a name; the schema's typed
+        // default is the source of truth.
+        let var = RoleVariable {
+            name: "depth".into(),
+            default: Some(VariableDefault::Value("legacy".into())),
+        };
+        let schema = json!({
+            "type": "object",
+            "properties": { "depth": { "type": "integer", "default": 7 } }
+        });
+        let out = resolve_slots(&[var], Some(&schema), None).unwrap();
+        assert_eq!(out.get("depth").map(String::as_str), Some("7"));
+    }
+
+    #[test]
+    fn resolve_slots_shell_default_runs() {
+        let schema = json!({
+            "type": "object",
+            "properties": { "greeting": { "type": "string", "default": { "shell": "printf hi" } } }
+        });
+        let out = resolve_slots(&[], Some(&schema), None).unwrap();
+        assert_eq!(out.get("greeting").map(String::as_str), Some("hi"));
+    }
 
     #[test]
     fn test_parse_structure_prompt1() {
