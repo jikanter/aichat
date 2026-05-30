@@ -197,9 +197,39 @@ pub async fn run(config: GlobalConfig, cli: Cli, text: Option<String>) -> Result
         input_text = output;
     }
 
+    // Phase 22A/23C: the pipeline label is the pipeline-def name when one was
+    // given, otherwise the generic "pipeline". Shared by the trace tree (22A)
+    // and the per-stage run-log records (23C).
+    let label = cli
+        .pipe_def
+        .as_deref()
+        .map(|p| {
+            Path::new(p)
+                .file_stem()
+                .and_then(|s| s.to_str())
+                .unwrap_or(p)
+                .to_string()
+        })
+        .unwrap_or_else(|| "pipeline".to_string());
+
+    // Phase 23C: cost attribution by role. Append one run-log record per stage,
+    // all sharing a single pipeline-run id, so downstream tooling can
+    // `GROUP BY stage_role`. The single-role path writes its own record in
+    // `start_directive`; this is the pipeline equivalent.
+    let run_log = config.read().run_log.clone();
+    if let Some(log_path) = run_log {
+        let log_path = std::path::PathBuf::from(log_path);
+        let run_id = uuid::Uuid::new_v4().to_string();
+        for (i, trace) in stage_traces.iter().enumerate() {
+            let record = stage_run_log_record(&run_id, &label, i + 1, trace);
+            if let Err(e) = crate::utils::ledger::append_run_log(&log_path, &record) {
+                warn!("Failed to write pipeline run log: {e}");
+            }
+        }
+    }
+
     // Phase 22A: render the DAG execution as a tree on stderr when `--trace`
-    // (human trace) is active. The label is the pipeline-def name when one was
-    // given, otherwise the generic "pipeline".
+    // (human trace) is active.
     let human_trace = config
         .read()
         .trace_config
@@ -207,17 +237,6 @@ pub async fn run(config: GlobalConfig, cli: Cli, text: Option<String>) -> Result
         .map(|t| t.human_trace)
         .unwrap_or(false);
     if human_trace {
-        let label = cli
-            .pipe_def
-            .as_deref()
-            .map(|p| {
-                Path::new(p)
-                    .file_stem()
-                    .and_then(|s| s.to_str())
-                    .unwrap_or(p)
-                    .to_string()
-            })
-            .unwrap_or_else(|| "pipeline".to_string());
         eprint!("{}", render_trace_tree(&label, &nodes, &stage_traces));
     }
 
@@ -2274,6 +2293,39 @@ fn render_trace_tree(label: &str, nodes: &[PipelineNode], traces: &[StageTrace])
         fmt_seconds(seq)
     );
     out
+}
+
+/// Phase 23C: the branch-aware label for a stage, matching the trace tree.
+/// Fan-out stages carry a numeric branch index; sequential stages do not.
+pub fn stage_label(trace: &StageTrace) -> String {
+    match trace.branch {
+        Some(b) => format!("branch{}: {}", b, trace.role),
+        None => trace.role.clone(),
+    }
+}
+
+/// Phase 23C: build one per-stage run-log record for cost attribution by role.
+/// `run_id` is shared across every stage of a single pipeline run; `label` is
+/// the pipeline-def name (or "pipeline"); `stage_idx` is 1-based.
+pub fn stage_run_log_record(
+    run_id: &str,
+    label: &str,
+    stage_idx: usize,
+    trace: &StageTrace,
+) -> serde_json::Value {
+    serde_json::json!({
+        "ts": crate::utils::now(),
+        "run_id": run_id,
+        "pipeline": label,
+        "stage": stage_idx,
+        "stage_role": stage_label(trace),
+        "model": trace.model,
+        "input_tokens": trace.input_tokens,
+        "output_tokens": trace.output_tokens,
+        "cost_usd": trace.cost_usd,
+        "latency_ms": trace.latency_ms,
+        "cached": trace.cached,
+    })
 }
 
 #[cfg(test)]

@@ -196,6 +196,9 @@ pub struct Cli {
     /// Run a multi-stage pipeline
     #[clap(long)]
     pub pipe: bool,
+    /// Phase 23B: run input through two roles and compare them side-by-side
+    #[clap(long, value_names = ["ROLE1", "ROLE2"], num_args = 2)]
+    pub compare: Vec<String>,
     /// Pipeline stages (role or role@model)
     #[clap(long = "stage", value_name = "ROLE[@MODEL]", requires = "pipe")]
     pub stages: Vec<String>,

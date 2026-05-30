@@ -2,10 +2,10 @@
 
 | Item | Description | Status |
 |---|---|---|
-| 23A | `metrics:` field on roles (shell commands that score output) | -- |
-| 23B | `--compare` flag (run input through two roles, show results side-by-side with cost) | -- |
-| 23C | Cost attribution by role in run log (tag each pipeline stage in JSONL) | -- |
-| 23D | Role invocation history (append scored records to per-role ledger) | -- |
+| 23A | `metrics:` field on roles (shell commands that score output) | **Done** |
+| 23B | `--compare` flag (run input through two roles, show results side-by-side with cost) | **Done** |
+| 23C | Cost attribution by role in run log (tag each pipeline stage in JSONL) | **Done** |
+| 23D | Role invocation history (append scored records to per-role ledger) | **Done** |
 
 **23A Design — Metrics Field:**
 
@@ -65,3 +65,54 @@ Currently the JSONL run log records the top-level role but not per-stage breakdo
 This enables downstream aggregation: `duckdb "SELECT role, SUM(cost_usd) FROM read_json('run.jsonl') GROUP BY role"`.
 
 **Files:** `src/pipe.rs` (add `stage_role` + `pipeline_role` to trace/run log entries), `src/utils/ledger.rs` (extend run log schema).
+
+---
+
+## Shipped (2026-05-30)
+
+Demo: [`docs/demos/phase-23-role-evaluation.md`](../demos/phase-23-role-evaluation.md).
+User docs: [`docs/features/role-evaluation.md`](../features/role-evaluation.md).
+
+**23A — `metrics:` field.** A role's frontmatter carries a `metrics:` list of
+`{name, shell}` pairs (serde `RoleMetric`, parsed in `Role::new`, accessor
+`Role::metrics()`). `evaluate_metrics(&[RoleMetric], output)` in
+`src/config/metrics.rs` runs each `shell` via `sh -c` with the output on stdin —
+exit 0 = pass, non-zero or spawn error = fail (never panics). In `start_directive`
+metrics run after output-schema validation and before lifecycle hooks, gated on
+`!is_dry_run`; results emit through `TraceEmitter::emit_metrics` and fold into the
+run log + role ledger. Declared metrics are discoverable offline via
+`--explain-role` (text + `-o json` `"metrics"` array).
+
+**23B — `--compare ROLE1 ROLE2`.** Two-value CLI flag. `run_compare` (main.rs)
+invokes both roles on the same input via `pipe::invoke_role`, scores each role's
+metrics, then `src/compare.rs::render_comparison` prints the side-by-side block
+(per-role output, `name=PASS/FAIL` metrics, cost) and a `--- Comparison ---`
+footer (cost ratio with $0-baseline guard, output-token delta, metrics
+agreement). `-o json` emits one `{roleA, roleB, comparison}` document. The
+renderer is a pure, unit-tested function over a `CompareResult` struct. Empty
+input bails with a clear error (exit 1).
+
+**23C — Cost attribution by role.** The single-role run-log record gains `role`
+and (when metrics ran) a `metrics:[{name,pass}]` array. The pipeline path writes
+one record per `StageTrace` (`stage_run_log_record`) with `pipeline`, `stage`,
+`stage_role`, model, tokens, `cost_usd`, latency, `cached` under one pipeline
+`run_id`, so `duckdb … GROUP BY stage_role` aggregates cost per role.
+
+**23D — Per-role invocation ledger.** Opt-in via `AICHAT_ROLE_LEDGER=<dir>`
+(→ `Config.role_ledger_dir`). Each invocation appends a scored record to
+`<dir>/<role>.jsonl` (`role_ledger_record`): truncated input/output summaries,
+model, tokens, `cost_usd`, latency, `schema_retries`, metric results. The
+filename is sanitized (`sanitize_role_name`). `--compare` ledgers both roles.
+
+**Tests added:** `src/config/metrics.rs` (4); `src/config/role.rs` (3 — metrics
+parse, empty-when-absent, `explain` surfaces metrics); `src/compare.rs` (the
+render/ratio/json suite); `src/utils/ledger.rs` (stage + role-ledger record
+shapes, summary truncation); `src/utils/trace.rs` (`emit_metrics`). Full
+`cargo test --bin aichat` green (636 passed, 0 failed).
+
+**Coverage note.** The pure cores (metric eval, comparison render, record
+builders, trace emit, frontmatter parse, explain surfacing) are unit-tested and
+verified offline against the built binary (`--explain-role`, `--compare` help +
+empty-input bail). End-to-end runtime wiring (metrics scored against live model
+output, run-log/ledger writes, a real `--compare`) needs a configured model and
+is not exercised by the offline demo.

@@ -1,6 +1,7 @@
 mod cache;
 mod cli;
 mod client;
+mod compare;
 mod config;
 mod context_budget;
 mod function;
@@ -139,6 +140,10 @@ fn apply_runtime_flags(config: &GlobalConfig, cli: &Cli) {
     if let Ok(log_path) = std::env::var(get_env_name("run_log")) {
         config.write().run_log = Some(log_path);
     }
+    // Phase 23D: per-role invocation ledger directory from AICHAT_ROLE_LEDGER
+    if let Ok(dir) = std::env::var(get_env_name("role_ledger")) {
+        config.write().role_ledger_dir = Some(dir);
+    }
     // Trace config from --trace flag or AICHAT_TRACE env var
     let env_trace = std::env::var(get_env_name("trace"))
         .map(|v| v == "1" || v == "true")
@@ -238,6 +243,13 @@ async fn run(config: GlobalConfig, mut cli: Cli, text: Option<String>) -> Result
     // below — observes them. They previously lived after this return, so
     // `--pipe --dry-run` and `--pipe --trace` were silently dropped.
     apply_runtime_flags(&config, &cli);
+
+    // Phase 23B: `--compare ROLE1 ROLE2` runs the same input through two roles
+    // and prints a side-by-side comparison (or a JSON object under `-o json`).
+    if cli.compare.len() == 2 {
+        let input_text = text.clone().unwrap_or_default();
+        return run_compare(&config, &cli.compare, &input_text, cli.output_format).await;
+    }
 
     if cli.pipe {
         return pipe::run(config, cli, text).await;
@@ -817,12 +829,42 @@ async fn start_directive(
         );
     }
 
+    // Phase 23A: evaluate role output metrics. Each metric runs a shell command
+    // against the final, schema-validated output. Skipped in dry-run (no real
+    // output to score). Results flow into the trace, run log (23C), and per-role
+    // ledger (23D).
+    let metric_results = if !is_dry_run {
+        let metrics_defs = input.role().metrics();
+        if metrics_defs.is_empty() {
+            Vec::new()
+        } else {
+            let results = crate::config::evaluate_metrics(metrics_defs, &output);
+            if let Some(ref emitter) = trace_emitter {
+                emitter.emit_metrics(&results);
+            }
+            results
+        }
+    } else {
+        Vec::new()
+    };
+    let metric_records: Vec<crate::utils::ledger::MetricRecord> = metric_results
+        .iter()
+        .map(|m| crate::utils::ledger::MetricRecord {
+            name: m.name.clone(),
+            pass: m.pass,
+        })
+        .collect();
+
+    // One run_id shared by the run log and the per-role ledger for this call.
+    let run_id = uuid::Uuid::new_v4().to_string();
+
     // JSONL run log
     if let Some(ref log_path) = config.read().run_log {
         let log_path = std::path::PathBuf::from(log_path);
-        let record = serde_json::json!({
+        let mut record = serde_json::json!({
             "ts": crate::utils::now(),
-            "run_id": uuid::Uuid::new_v4().to_string(),
+            "run_id": run_id,
+            "role": input.role().name(),
             "model": metrics.model_id,
             "input_tokens": metrics.input_tokens,
             "output_tokens": metrics.output_tokens,
@@ -830,8 +872,36 @@ async fn start_directive(
             "latency_ms": metrics.latency_ms,
             "schema_retries": schema_retry_attempts,
         });
+        if !metric_results.is_empty() {
+            record["metrics"] = serde_json::json!(metric_results);
+        }
         if let Err(e) = crate::utils::ledger::append_run_log(&log_path, &record) {
             warn!("Failed to write run log: {e}");
+        }
+    }
+
+    // Phase 23D: per-role invocation-history ledger (opt-in via AICHAT_ROLE_LEDGER).
+    if let Some(ref dir) = config.read().role_ledger_dir {
+        if !is_dry_run {
+            let role_name = input.role().name().to_string();
+            let file = std::path::Path::new(dir)
+                .join(format!("{}.jsonl", crate::config::sanitize_role_name(&role_name)));
+            let record = crate::utils::ledger::role_ledger_record(
+                &run_id,
+                &role_name,
+                &metrics.model_id,
+                &input.text(),
+                &output,
+                metrics.input_tokens,
+                metrics.output_tokens,
+                metrics.cost_usd,
+                metrics.latency_ms,
+                schema_retry_attempts,
+                &metric_records,
+            );
+            if let Err(e) = crate::utils::ledger::append_run_log(&file, &record) {
+                warn!("Failed to write role ledger: {e}");
+            }
         }
     }
 
@@ -880,6 +950,75 @@ async fn start_directive(
         .after_chat_completion(&input, &output, &tool_results)?;
 
     config.write().exit_session()?;
+    Ok(())
+}
+
+/// Phase 23B: run `input_text` through both roles, score each role's metrics
+/// against its output, and render a side-by-side comparison. The rendering
+/// itself lives in `crate::compare::render_comparison` (pure + unit-tested);
+/// this driver does the two LLM invocations and metric evaluation.
+async fn run_compare(
+    config: &GlobalConfig,
+    roles: &[String],
+    input_text: &str,
+    output_format: Option<crate::cli::OutputFormat>,
+) -> Result<()> {
+    let abort_signal = create_abort_signal();
+    let mut sides: Vec<crate::compare::CompareResult> = Vec::with_capacity(2);
+    for role_name in roles.iter().take(2) {
+        let result =
+            crate::pipe::invoke_role(config, role_name, input_text, abort_signal.clone()).await?;
+        // Load the role to evaluate its declared metrics against the output.
+        let metrics = match config.read().retrieve_role(role_name) {
+            Ok(role) => crate::config::evaluate_metrics(role.metrics(), &result.output),
+            Err(_) => Vec::new(),
+        };
+        sides.push(crate::compare::CompareResult {
+            role: role_name.clone(),
+            model: result.metrics.model_id.clone(),
+            output: result.output,
+            input_tokens: result.metrics.input_tokens,
+            output_tokens: result.metrics.output_tokens,
+            cost_usd: result.metrics.cost_usd,
+            metrics,
+        });
+
+        // Phase 23D: record each compared role's invocation in the per-role ledger.
+        if let Some(ref dir) = config.read().role_ledger_dir {
+            let side = sides.last().unwrap();
+            let metric_records: Vec<crate::utils::ledger::MetricRecord> = side
+                .metrics
+                .iter()
+                .map(|m| crate::utils::ledger::MetricRecord {
+                    name: m.name.clone(),
+                    pass: m.pass,
+                })
+                .collect();
+            let file = std::path::Path::new(dir).join(format!(
+                "{}.jsonl",
+                crate::config::sanitize_role_name(role_name)
+            ));
+            let record = crate::utils::ledger::role_ledger_record(
+                &uuid::Uuid::new_v4().to_string(),
+                role_name,
+                &side.model,
+                input_text,
+                &side.output,
+                side.input_tokens,
+                side.output_tokens,
+                side.cost_usd,
+                result.metrics.latency_ms,
+                0,
+                &metric_records,
+            );
+            if let Err(e) = crate::utils::ledger::append_run_log(&file, &record) {
+                warn!("Failed to write role ledger: {e}");
+            }
+        }
+    }
+    let json = matches!(output_format, Some(crate::cli::OutputFormat::Json));
+    let rendered = crate::compare::render_comparison(&sides[0], &sides[1], json);
+    println!("{rendered}");
     Ok(())
 }
 

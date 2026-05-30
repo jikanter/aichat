@@ -61,6 +61,75 @@ impl KnowledgeBinding {
     }
 }
 
+/// Phase 23A: one output-scoring metric declared on a role. The `shell`
+/// command receives the role's final output on stdin and exits 0 (pass) or
+/// non-zero (fail). Metrics are evaluated after output-schema validation
+/// succeeds, before lifecycle hooks.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct RoleMetric {
+    pub name: String,
+    pub shell: String,
+}
+
+/// Phase 23A: the pass/fail result of evaluating one `RoleMetric`.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct MetricResult {
+    pub name: String,
+    pub pass: bool,
+}
+
+/// Phase 23A: evaluate a role's metrics against its final output. Each metric's
+/// `shell` command runs via `sh -c <shell>` with `output` piped to stdin;
+/// `pass` is true iff the command exits with a success status. A spawn failure
+/// counts as a failed metric. Synchronous and side-effect-free apart from the
+/// metric subprocesses.
+pub fn evaluate_metrics(metrics: &[RoleMetric], output: &str) -> Vec<MetricResult> {
+    use std::io::Write;
+    use std::process::{Command, Stdio};
+
+    metrics
+        .iter()
+        .map(|metric| {
+            let pass = (|| -> std::io::Result<bool> {
+                let mut child = Command::new("sh")
+                    .arg("-c")
+                    .arg(&metric.shell)
+                    .stdin(Stdio::piped())
+                    .stdout(Stdio::null())
+                    .stderr(Stdio::null())
+                    .spawn()?;
+                if let Some(mut stdin) = child.stdin.take() {
+                    // Ignore broken-pipe errors: a metric that doesn't read
+                    // stdin (e.g. `true`) may close it before we finish.
+                    let _ = stdin.write_all(output.as_bytes());
+                }
+                let status = child.wait()?;
+                Ok(status.success())
+            })()
+            .unwrap_or(false);
+            MetricResult {
+                name: metric.name.clone(),
+                pass,
+            }
+        })
+        .collect()
+}
+
+/// Phase 23D: sanitize a role name for use as a ledger filename component.
+/// Replaces path separators, `:` and whitespace with `_` so addressed roles
+/// (`mcp:foo`, `bar/baz`) map to a single flat file.
+pub fn sanitize_role_name(name: &str) -> String {
+    name.chars()
+        .map(|c| {
+            if c == '/' || c == '\\' || c == ':' || c.is_whitespace() {
+                '_'
+            } else {
+                c
+            }
+        })
+        .collect()
+}
+
 /// Phase 26C: parse the flexible `knowledge:` frontmatter into a list of
 /// bindings. Accepts three shapes:
 /// - `knowledge: my-kb` (string → single binding)
@@ -197,6 +266,11 @@ pub struct Role {
     //       weight: 1.5
     #[serde(default, skip_serializing_if = "Vec::is_empty", skip_deserializing)]
     knowledge_bindings: Vec<KnowledgeBinding>,
+
+    // Phase 23A: output-scoring metrics. Each runs a shell command against the
+    // role's final output and records pass/fail in the trace + run log.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    metrics: Vec<RoleMetric>,
 
     /// Phase 26E: inject (default) auto-attaches retrieved facts to the
     /// user message; tool exposes `search_knowledge` for the LLM to call.
@@ -1545,6 +1619,21 @@ impl Role {
                                     role.knowledge_mode =
                                         value.as_str().map(|v| v.to_string())
                                 }
+                                // Phase 23A: output-scoring metrics
+                                "metrics" => {
+                                    if let Some(arr) = value.as_array() {
+                                        role.metrics = arr
+                                            .iter()
+                                            .filter_map(|v| match serde_json::from_value::<RoleMetric>(v.clone()) {
+                                                Ok(m) => Some(m),
+                                                Err(e) => {
+                                                    warn!("Skipping invalid metric in role '{}': {e}", name);
+                                                    None
+                                                }
+                                            })
+                                            .collect();
+                                    }
+                                }
                                 // Phase 27D: per-fact citation markers in LLM output
                                 "attributed_output" => {
                                     role.attributed_output =
@@ -1621,6 +1710,9 @@ impl Role {
         }
         if let Some(examples) = &self.examples {
             meta.insert("examples".into(), serde_json::json!(examples));
+        }
+        if !self.metrics.is_empty() {
+            meta.insert("metrics".into(), serde_json::json!(self.metrics));
         }
         if let Some(pipeline) = &self.pipeline {
             meta.insert("pipeline".into(), serde_json::json!(pipeline));
@@ -1935,6 +2027,11 @@ impl Role {
     /// Phase 26C: Knowledge-base bindings declared by this role.
     pub fn knowledge_bindings(&self) -> &[KnowledgeBinding] {
         &self.knowledge_bindings
+    }
+
+    /// Phase 23A: output-scoring metrics declared by this role.
+    pub fn metrics(&self) -> &[RoleMetric] {
+        &self.metrics
     }
 
     /// Phase 26E: "inject" (default) or "tool". When `tool`, the

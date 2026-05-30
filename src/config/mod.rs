@@ -17,6 +17,7 @@ pub use self::role::{
     read_role_raw_metadata, render_forked_role, run_lifecycle_hooks, validate_schema,
     validate_schema_detailed, validate_schema_traced, KnowledgeBinding, MergeStrategy,
     ParallelNode, PipelineNode, Predicate, Role, RoleExample, RoleExplanation, RoleLike,
+    evaluate_metrics, sanitize_role_name,
     RolePipelineStage, RolePublicView, SwitchBranch, SwitchNode, CODE_ROLE, CREATE_TITLE_ROLE,
     EXPLAIN_SHELL_ROLE, SHELL_ROLE,
 };
@@ -302,6 +303,11 @@ pub struct Config {
     pub strip_thinking: bool,
     #[serde(skip)]
     pub run_log: Option<String>,
+    /// Phase 23D: directory for per-role invocation-history ledgers. Set via the
+    /// `AICHAT_ROLE_LEDGER` env var. When present, each role invocation appends a
+    /// scored record to `<dir>/<role>.jsonl`.
+    #[serde(skip)]
+    pub role_ledger_dir: Option<String>,
     #[serde(skip)]
     pub trace_config: Option<trace::TraceConfig>,
 
@@ -462,6 +468,7 @@ impl Default for Config {
             show_cost: false,
             strip_thinking: false,
             run_log: None,
+            role_ledger_dir: None,
             trace_config: None,
 
             output_format: None,
