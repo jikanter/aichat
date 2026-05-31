@@ -1,7 +1,8 @@
 # Auto-Memory (`memory/MEMORY.md`)
 
-**Status:** 34A shipped (read-only). The write loop (34C/34D) is deferred —
-see [`docs/roadmap/phase-34-overview.md`](../roadmap/phase-34-overview.md).
+**Status:** 34A–34D shipped — read-on-startup, lazy topic-load, and the
+session-exit Reflector/Curator write loop. See
+[`docs/roadmap/phase-34-overview.md`](../roadmap/phase-34-overview.md).
 
 Auto-memory is aichat's freeform, read-on-startup notes layer. It is the
 session-level counterpart to the typed [`knowledge/`](knowledge.md) store:
@@ -85,18 +86,64 @@ their own system prompt and may originate from external clients.
 | | `memory/` (this feature) | `knowledge/` (Phases 25–27) |
 |---|---|---|
 | Storage | Markdown + YAML frontmatter, freeform | Typed JSONL + `manifest.yaml` |
-| Writer | Human (by hand); Reflector in 34C (deferred) | `--knowledge-reflect` / `--knowledge-curate` |
-| Query | Read on startup; lazy topic-load in 34B (reserved) | Tag → BM25 → graph-walk → RRF |
+| Writer | Human (by hand); session-exit Reflector (34C) gated by Curator (34D) | `--knowledge-reflect` / `--knowledge-curate` |
+| Query | Read on startup; lazy topic-load by reference (34B) | Tag → BM25 → graph-walk → RRF |
 | Audit | Git history | Append-only `revisions.jsonl` |
 
-## Deferred (34B–34D)
+## Lazy topic-loading (34B)
 
-- **34B** — lazy-load of topic files referenced from `MEMORY.md`. The loader
-  API is reserved; its reference sources depend on other Epic-14 themes.
-- **34C** — session-exit Reflector emitting candidate `memory/<topic>.md`
-  files. Gated on a separate design review of the Reflector prompt and the
-  secret-redaction pass.
-- **34D** — Curator gate (interactive accept/skip/edit, `--memory-auto-curate`).
-  Lands with 34C so no candidate is written without a gate.
+`MEMORY.md` is the always-loaded index; the topic files it links to are loaded
+only on demand. A `memory:<reference>` path resolves against the index links
+(`[label](topic.md)`) and topic filenames, then expands to the topic file at
+`Input::from_files`:
+
+```bash
+aichat -f memory:cite_sources "draft the intro"   # loads memory/feedback_cite_sources.md
+aichat --memory-load cite_sources                 # prints the resolved topic (capped)
+```
+
+A reference matches by filename stem or by substring of an index link target;
+`MEMORY.md` itself is never resolvable as a topic. An unresolvable reference
+errors (`--memory-load`) or passes through unchanged (`-f`).
+
+## The write loop (34C/34D)
+
+At session exit — opt-in via `--memory-reflect-on-exit` (or
+`AICHAT_MEMORY_REFLECT_ON_EXIT=1`) — aichat reflects over the conversation and
+gates any candidate notes through the Curator. The same loop is reachable as a
+one-shot from a transcript:
+
+```bash
+aichat --memory-reflect --memory-transcript chat.txt    # emit candidate set as JSON
+aichat --memory-curate  --memory-transcript chat.txt    # reflect, then gate interactively
+aichat --memory-curate  --memory-candidates cands.json  # gate a pre-built candidate set
+```
+
+**Secret redaction is mandatory and runs first.** Before the transcript ever
+reaches the Reflector, `redact_secrets` rewrites recognized credentials
+(`api_key`/`secret`/`password`/`token` assignments, `Bearer <tok>`, and
+`sk-ant-`/`sk-`/`xoxb-`/`ghp_` prefixes) to `[REDACTED:<class>]`. There is no
+flag to disable it — it is the only defense against persisting a leaked key.
+
+The Reflector reuses the `knowledge/evolve.rs` pattern: a role whose name ends
+`-memory-reflector` emits a structured candidate set (`topic`, `body`,
+`turns_referenced`). Each candidate's topic slug is sanitized so it can never
+inject a path separator.
+
+**The Curator gate** prompts per candidate:
+
+```
+[a]ccept   write memory/<topic>.md + append an index line to MEMORY.md
+[s]kip     drop this candidate, continue
+[e]dit     open $EDITOR on the body, then re-prompt
+[r]eject-all   abort the rest of the set, exit 0, write nothing
+```
+
+`accept` writes atomically (temp file + rename) and stamps frontmatter
+(`created`, `session`, `reflector_model`, `curator`). `--memory-auto-curate`
+(hidden, opt-in) accepts every candidate without prompting — for non-interactive
+runs. A closed stdin (EOF) is treated as `reject-all`, so a broken pipe never
+silently writes. An accepted candidate is immediately lazy-loadable by its
+topic reference (34B).
 
 See the [demo](../demos/phase-34-auto-memory.md) for runnable examples.

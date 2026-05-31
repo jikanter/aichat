@@ -270,6 +270,11 @@ Type ".help" for additional help.
                 _ => {}
             }
         }
+        if self.config.read().memory_reflect_on_exit {
+            if let Err(err) = crate::memory::reflect_on_exit(&self.config).await {
+                eprintln!("memory: reflect-on-exit failed: {err}");
+            }
+        }
         self.config.write().exit_session()?;
         Ok(())
     }

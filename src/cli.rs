@@ -337,6 +337,31 @@ pub struct Cli {
     /// Phase 27B: path to a JSONL trace file (use with --knowledge-reflect or --knowledge-curate)
     #[clap(long = "knowledge-trace", value_name = "FILE")]
     pub knowledge_trace: Option<String>,
+    /// Phase 34C: run the memory Reflector over a transcript, emit candidate topic files (JSON)
+    #[clap(long = "memory-reflect")]
+    pub memory_reflect: bool,
+    /// Phase 34D: run the memory curator gate (reflect or --memory-candidates) and write accepted topic files
+    #[clap(long = "memory-curate")]
+    pub memory_curate: bool,
+    /// Phase 34C/D: transcript file for --memory-reflect / --memory-curate (default: stdin)
+    #[clap(long = "memory-transcript", value_name = "FILE")]
+    pub memory_transcript: Option<String>,
+    /// Phase 34D: JSON candidate set; skips the Reflector (use with --memory-curate)
+    #[clap(
+        long = "memory-candidates",
+        value_name = "FILE",
+        requires = "memory_curate"
+    )]
+    pub memory_candidates: Option<String>,
+    /// Phase 34D: auto-accept every memory candidate without prompting (opt-in; hidden by design)
+    #[clap(long = "memory-auto-curate", hide = true, requires = "memory_curate")]
+    pub memory_auto_curate: bool,
+    /// Phase 34B: resolve a topic reference against MEMORY.md and print its (capped) content
+    #[clap(long = "memory-load", value_name = "REFERENCE")]
+    pub memory_load: Option<String>,
+    /// Phase 34C: at REPL exit, reflect over the session and gate memory candidates (opt-in)
+    #[clap(long = "memory-reflect-on-exit")]
+    pub memory_reflect_on_exit: bool,
     /// Input text
     #[clap(trailing_var_arg = true)]
     text: Vec<String>,

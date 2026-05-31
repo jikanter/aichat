@@ -1,13 +1,13 @@
 # Phase 34: Auto-Memory Wiring : Overview - Epic 14
 
-**Status (2026-05-30):** **34A Done** (read-only surface shipped); **34B–34D Planned.** This phase fills the agent-writer slot at the session level by wiring a freeform `memory/` surface alongside the typed `knowledge/` store. Implements Theme 2 of [`260524_anthropic_memory_divergence.md`](https://github.com/jikanter/aichat-private/) (Posture C "compose"). Pairs with [Phase 35](phase-35-overview.md) (Knowledge-MCP) — together they form Epic 14's dual-writer architecture. User-facing doc: [`docs/features/auto-memory.md`](../features/auto-memory.md); demo: [`docs/demos/phase-34-auto-memory.md`](../demos/phase-34-auto-memory.md).
+**Status (2026-05-30):** **34A–34D Done** (read-only surface + topic-file lazy-load + Reflector/Curator write loop shipped). This phase fills the agent-writer slot at the session level by wiring a freeform `memory/` surface alongside the typed `knowledge/` store. Implements Theme 2 of [`260524_anthropic_memory_divergence.md`](https://github.com/jikanter/aichat-private/) (Posture C "compose"). Pairs with [Phase 35](phase-35-overview.md) (Knowledge-MCP) — together they form Epic 14's dual-writer architecture. User-facing doc: [`docs/features/auto-memory.md`](../features/auto-memory.md); demo: [`docs/demos/phase-34-auto-memory.md`](../demos/phase-34-auto-memory.md).
 
 | Item | Description | Status |
 |---|---|---|
 | 34A | Read `memory/MEMORY.md` at REPL/CLI startup as additional system-prompt context — mirrors Claude Code's first-200-lines auto-load discipline. Read-only. | **Done** (2026-05-30) |
-| 34B | Topic-file lazy loading — when a relative markdown link in `MEMORY.md` is referenced by the role/conversation, lazy-load via the existing `Input::from_files_with_spinner` plumbing. | Planned (design draft) |
-| 34C | Session-exit Reflector pass — emit candidate `memory/<topic>.md` files from the conversation transcript, reusing the [`src/knowledge/evolve.rs`](../../src/knowledge/evolve.rs) Reflector role. | Planned (design draft) |
-| 34D | Curator gate — prompt the user before persisting topic files, or auto-accept under `--memory-auto-curate`. Closes the dual-writer loop. | Planned (design draft) |
+| 34B | Topic-file lazy loading — a `memory:<ref>` path (resolved against `MEMORY.md` links or topic filenames) expands to the topic file at `Input::from_files`. `--memory-load <ref>` prints a resolved topic. | **Done** (2026-05-30) |
+| 34C | Session-exit Reflector pass — `--memory-reflect` / `--memory-reflect-on-exit` redact secrets, then emit candidate `memory/<topic>.md` files from the transcript, reusing the [`src/knowledge/evolve.rs`](../../src/knowledge/evolve.rs) Reflector pattern (`*-memory-reflector` role). | **Done** (2026-05-30) |
+| 34D | Curator gate — `--memory-curate` prompts `[a]ccept [s]kip [e]dit [r]eject-all` before atomic-writing topic files + appending to `MEMORY.md`; `--memory-auto-curate` accepts all. Closes the dual-writer loop. | **Done** (2026-05-30) |
 
 ## Background
 

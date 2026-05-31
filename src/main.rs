@@ -71,8 +71,11 @@ async fn main() -> Result<()> {
         process::exit(exit);
     }
 
-    // MCP mode uses stdin as transport — don't consume it here
-    let text = if cli.mcp { None } else { cli.text()? };
+    // MCP mode uses stdin as transport — don't consume it here. The memory
+    // write/reflect subcommands (Phase 34C/D) likewise own stdin: the curator
+    // reads accept/skip decisions and the Reflector reads a transcript from it.
+    let owns_stdin = cli.mcp || cli.memory_reflect || cli.memory_curate;
+    let text = if owns_stdin { None } else { cli.text()? };
     let working_mode = if cli.mcp {
         WorkingMode::Mcp
     } else if cli.serve.is_some() {
@@ -107,7 +110,12 @@ async fn main() -> Result<()> {
         // Phase 27B: reflect prints a candidate set and exits; curate mutates
         // a KB but still short-circuits the interactive path.
         || cli.knowledge_reflect.is_some()
-        || cli.knowledge_curate.is_some();
+        || cli.knowledge_curate.is_some()
+        // Phase 34B/C/D: memory load/reflect/curate short-circuit and exit;
+        // they need no heavy client setup (mirrors the knowledge ops above).
+        || cli.memory_load.is_some()
+        || cli.memory_reflect
+        || cli.memory_curate;
     setup_logger(working_mode.is_serve() || working_mode.is_mcp())?;
     let config = Arc::new(RwLock::new(Config::init(working_mode, info_flag).await?));
     let output_format = cli.output_format;
@@ -133,6 +141,14 @@ fn apply_runtime_flags(config: &GlobalConfig, cli: &Cli) {
     }
     if cli.dry_run {
         config.write().dry_run = true;
+    }
+    // Phase 34C: opt-in session-exit Reflector trigger. Also honour the env var
+    // AICHAT_MEMORY_REFLECT_ON_EXIT so it can be set without a CLI flag.
+    let env_reflect_on_exit = std::env::var(get_env_name("memory_reflect_on_exit"))
+        .map(|v| v == "1" || v == "true")
+        .unwrap_or(false);
+    if cli.memory_reflect_on_exit || env_reflect_on_exit {
+        config.write().memory_reflect_on_exit = true;
     }
     if cli.cost {
         config.write().show_cost = true;
@@ -377,6 +393,29 @@ async fn run(config: GlobalConfig, mut cli: Cli, text: Option<String>) -> Result
             kb_name,
             cli.knowledge_candidates.as_deref(),
             cli.knowledge_trace.as_deref(),
+        )
+        .await;
+    }
+    // Phase 34B/C/D: freeform memory write + lazy-load surface. Like the
+    // knowledge subcommands these short-circuit the interactive path.
+    if let Some(ref reference) = cli.memory_load {
+        match memory::load_topic(reference) {
+            Some((_, text)) => {
+                println!("{text}");
+                return Ok(());
+            }
+            None => bail!("memory: no topic resolves for reference '{reference}'"),
+        }
+    }
+    if cli.memory_reflect {
+        return memory::reflect::run_reflect_cli(&config, cli.memory_transcript.as_deref()).await;
+    }
+    if cli.memory_curate {
+        return memory::curate::run_curate_cli(
+            &config,
+            cli.memory_transcript.as_deref(),
+            cli.memory_candidates.as_deref(),
+            cli.memory_auto_curate,
         )
         .await;
     }

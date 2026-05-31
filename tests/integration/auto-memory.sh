@@ -71,3 +71,97 @@ EOF
   [ "$status" -eq 0 ]
   [[ "$output" != *"memory preamble cap"* ]]
 }
+
+# ----- 34B: topic-file lazy loading -----
+
+@test "34B: --memory-load resolves a topic by reference and prints its content" {
+  cat > "$MEM_DIR/MEMORY.md" <<EOF
+# Memory Index
+- [Cite sources](feedback_cite_sources.md) — link docs inline
+EOF
+  cat > "$MEM_DIR/feedback_cite_sources.md" <<EOF
+Always cite sources inline when answering.
+EOF
+  run "$AICHAT_BIN" --memory-load cite_sources
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"Always cite sources inline"* ]]
+}
+
+@test "34B: --memory-load errors on an unresolvable reference" {
+  printf '# Memory Index\n' > "$MEM_DIR/MEMORY.md"
+  run "$AICHAT_BIN" --memory-load nope
+  [ "$status" -ne 0 ]
+}
+
+# ----- 34C: Reflector secret redaction -----
+
+@test "34C: redaction replaces a secret before the Reflector sees it" {
+  # AICHAT_MEMORY_REFLECT_ECHO makes the Reflector echo the (redacted)
+  # transcript as the candidate body — no LLM call, fully offline.
+  printf '# Memory Index\n' > "$MEM_DIR/MEMORY.md"
+  TRANSCRIPT="$MEM_DIR/transcript.txt"
+  printf 'user: export OPENAI_API_KEY=sk-test-12345 then run it\n' > "$TRANSCRIPT"
+  AICHAT_MEMORY_REFLECT_ECHO=1 run "$AICHAT_BIN" --memory-reflect --memory-transcript "$TRANSCRIPT"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"[REDACTED:"* ]]
+  [[ "$output" != *"sk-test-12345"* ]]
+}
+
+# ----- 34D: curator gate -----
+
+@test "34D: accept writes the topic file and appends to MEMORY.md" {
+  printf '# Memory Index\n' > "$MEM_DIR/MEMORY.md"
+  CANDS="$MEM_DIR/cands.json"
+  cat > "$CANDS" <<EOF
+{"candidates":[{"topic":"tokio_pref","body":"User prefers tokio.","turns_referenced":[3]}]}
+EOF
+  run bash -c "printf 'a\n' | '$AICHAT_BIN' --memory-curate --memory-candidates '$CANDS'"
+  [ "$status" -eq 0 ]
+  [ -f "$MEM_DIR/tokio_pref.md" ]
+  grep -q "User prefers tokio." "$MEM_DIR/tokio_pref.md"
+  grep -q "(tokio_pref.md)" "$MEM_DIR/MEMORY.md"
+}
+
+@test "34D: reject-all aborts cleanly with exit 0 and writes nothing" {
+  printf '# Memory Index\n' > "$MEM_DIR/MEMORY.md"
+  CANDS="$MEM_DIR/cands.json"
+  cat > "$CANDS" <<EOF
+{"candidates":[
+  {"topic":"a","body":"one"},
+  {"topic":"b","body":"two"},
+  {"topic":"c","body":"three"}
+]}
+EOF
+  run bash -c "printf 'r\n' | '$AICHAT_BIN' --memory-curate --memory-candidates '$CANDS'"
+  [ "$status" -eq 0 ]
+  [ ! -f "$MEM_DIR/a.md" ]
+  [ ! -f "$MEM_DIR/b.md" ]
+  [ ! -f "$MEM_DIR/c.md" ]
+}
+
+@test "34D: --memory-auto-curate accepts every candidate without prompting" {
+  printf '# Memory Index\n' > "$MEM_DIR/MEMORY.md"
+  CANDS="$MEM_DIR/cands.json"
+  cat > "$CANDS" <<EOF
+{"candidates":[
+  {"topic":"one","body":"first"},
+  {"topic":"two","body":"second"}
+]}
+EOF
+  run "$AICHAT_BIN" --memory-curate --memory-candidates "$CANDS" --memory-auto-curate
+  [ "$status" -eq 0 ]
+  [ -f "$MEM_DIR/one.md" ]
+  [ -f "$MEM_DIR/two.md" ]
+}
+
+@test "34D + 34B: an accepted candidate becomes lazy-loadable by reference" {
+  printf '# Memory Index\n' > "$MEM_DIR/MEMORY.md"
+  CANDS="$MEM_DIR/cands.json"
+  cat > "$CANDS" <<EOF
+{"candidates":[{"topic":"rust_async","body":"Prefer tokio::spawn for new code."}]}
+EOF
+  "$AICHAT_BIN" --memory-curate --memory-candidates "$CANDS" --memory-auto-curate
+  run "$AICHAT_BIN" --memory-load rust_async
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"Prefer tokio::spawn"* ]]
+}

@@ -147,6 +147,28 @@ impl Session {
         self.messages.iter().any(|v| v.role.is_user())
     }
 
+    /// Phase 34C: a plain `role: text` transcript of the conversation
+    /// (compressed history first, then live turns), system messages excluded.
+    /// Feeds the memory Reflector; secrets are redacted by the Reflector pass
+    /// before any LLM sees it.
+    pub fn transcript(&self) -> String {
+        self.compressed_messages
+            .iter()
+            .chain(self.messages.iter())
+            .filter(|m| m.role != MessageRole::System)
+            .map(|m| {
+                let who = match m.role {
+                    MessageRole::User => "user",
+                    MessageRole::Assistant => "assistant",
+                    MessageRole::Tool => "tool",
+                    MessageRole::System => "system",
+                };
+                format!("{who}: {}", m.content.to_text())
+            })
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
     pub fn user_messages_len(&self) -> usize {
         self.messages.iter().filter(|v| v.role.is_user()).count()
     }

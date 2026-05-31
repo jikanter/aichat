@@ -368,6 +368,12 @@ pub struct Config {
     /// discoverable. Read-only; the write loop (34C/34D) is deferred.
     #[serde(skip)]
     pub memory_preamble: Option<String>,
+    /// Phase 34C: when set (CLI `--memory-reflect-on-exit`), the legacy REPL
+    /// runs the memory Reflector + curator gate over the session transcript at
+    /// exit. Opt-in, never default — per open question 2, silent per-exit
+    /// token spend would violate cost-conscious-above-all.
+    #[serde(skip)]
+    pub memory_reflect_on_exit: bool,
 }
 
 /// State for deferred tool loading (Phase 1C).
@@ -499,6 +505,7 @@ impl Default for Config {
             last_knowledge_events: Vec::new(),
             last_knowledge_hits: Vec::new(),
             memory_preamble: None,
+            memory_reflect_on_exit: false,
         }
     }
 }

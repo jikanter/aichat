@@ -14,6 +14,9 @@
 //! both (used by the integration tests and by power users who keep memory
 //! outside the default chain).
 
+pub mod curate;
+pub mod reflect;
+
 use std::path::PathBuf;
 
 use crate::config::Config;
@@ -149,6 +152,135 @@ pub fn inject_preamble(messages: &mut Vec<crate::client::Message>, block: &str) 
     );
 }
 
+// ---------- 34B: topic-file lazy loading ----------
+
+/// Path-list scheme that resolves to a memory topic file: `memory:<reference>`.
+/// Extends the loader so `aichat -f memory:cite_sources` (and, once Theme 3
+/// role `@path` imports land, `@memory/...`) resolve through the same API
+/// without rework — see phase-34 §34B precedence list.
+pub const MEMORY_SCHEME: &str = "memory:";
+
+/// Parse `[label](target)` markdown links out of `MEMORY.md`, keeping only
+/// relative `*.md` targets (the topic-file convention). Returns
+/// `(label, target)` pairs in document order.
+pub fn index_links(index: &str) -> Vec<(String, String)> {
+    let mut out = Vec::new();
+    let bytes = index.as_bytes();
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] == b'[' {
+            if let Some(close) = index[i + 1..].find(']') {
+                let label_end = i + 1 + close;
+                if index[label_end + 1..].starts_with('(') {
+                    let paren_start = label_end + 2;
+                    if let Some(paren) = index[paren_start..].find(')') {
+                        let target = &index[paren_start..paren_start + paren];
+                        let label = &index[i + 1..label_end];
+                        if target.ends_with(".md")
+                            && !target.contains("://")
+                            && !target.starts_with('/')
+                        {
+                            out.push((label.to_string(), target.to_string()));
+                        }
+                        i = paren_start + paren + 1;
+                        continue;
+                    }
+                }
+            }
+        }
+        i += 1;
+    }
+    out
+}
+
+/// Resolve a topic reference (bare slug, filename, or label substring) to a
+/// concrete file inside the active memory dir. Matching precedence:
+/// 1. `<reference>.md` (or `<reference>`) is a file in the memory dir.
+/// 2. The reference is a case-insensitive substring of a `MEMORY.md` link
+///    target stem or label.
+pub fn resolve_topic(reference: &str) -> Option<PathBuf> {
+    let dir = memory_dir()?;
+    let r = reference.trim();
+    // Direct filename hit.
+    for name in [r.to_string(), format!("{r}.md")] {
+        let cand = dir.join(&name);
+        if cand.is_file() && cand != dir.join(MEMORY_INDEX) {
+            return Some(cand);
+        }
+    }
+    // Index-link match.
+    let index = std::fs::read_to_string(dir.join(MEMORY_INDEX)).ok()?;
+    let needle = r.to_ascii_lowercase();
+    for (label, target) in index_links(&index) {
+        let stem = target.trim_end_matches(".md");
+        if stem.to_ascii_lowercase().contains(&needle)
+            || label.to_ascii_lowercase().contains(&needle)
+        {
+            let path = dir.join(target);
+            if path.is_file() {
+                return Some(path);
+            }
+        }
+    }
+    None
+}
+
+/// Load a referenced topic file, capped to the same budget as the startup
+/// preamble. `None` when the reference doesn't resolve or the file is empty.
+pub fn load_topic(reference: &str) -> Option<(PathBuf, String)> {
+    let path = resolve_topic(reference)?;
+    let raw = std::fs::read_to_string(&path).ok()?;
+    if raw.trim().is_empty() {
+        return None;
+    }
+    let (text, _truncated) = cap_preamble(&raw);
+    Some((path, text))
+}
+
+/// Rewrite any `memory:<reference>` entries in a file-path list to the
+/// resolved local path. Unresolved references are passed through unchanged so
+/// the normal loader surfaces a "file not found" error rather than this layer
+/// swallowing it.
+pub fn expand_memory_refs(paths: Vec<String>) -> Vec<String> {
+    paths
+        .into_iter()
+        .map(|p| match p.strip_prefix(MEMORY_SCHEME) {
+            Some(reference) => resolve_topic(reference)
+                .map(|path| path.display().to_string())
+                .unwrap_or(p),
+            None => p,
+        })
+        .collect()
+}
+
+/// Phase 34C: REPL session-exit trigger. Opt-in via `--memory-reflect-on-exit`
+/// (or `AICHAT_MEMORY_REFLECT_ON_EXIT`). Builds the transcript from the active
+/// session, runs the Reflector (secrets redacted first), and gates the
+/// candidates through the interactive Curator. A session with no user turns is
+/// a no-op so an empty REPL launch never prompts.
+pub async fn reflect_on_exit(config: &crate::config::GlobalConfig) -> anyhow::Result<()> {
+    let (transcript, session_name, model_id) = {
+        let cfg = config.read();
+        let Some(session) = cfg.session.as_ref() else {
+            return Ok(());
+        };
+        if !session.has_user_messages() {
+            return Ok(());
+        }
+        (
+            session.transcript(),
+            Some(session.name().to_string()),
+            Some(cfg.model.id()),
+        )
+    };
+    let set = reflect::reflect(config, &transcript).await?;
+    if set.candidates.is_empty() {
+        return Ok(());
+    }
+    curate::run_curate(&set.candidates, false, session_name, model_id)?;
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -225,6 +357,48 @@ mod tests {
             _ => panic!("system message should be text"),
         }
         assert_eq!(messages.len(), 2);
+    }
+
+    #[test]
+    fn index_links_extracts_relative_md_links_only() {
+        let index = "# Memory Index\n\
+            - [Cite sources](feedback_cite_sources.md) — hook\n\
+            - [Remote](https://example.com/x.md) — skip absolute url\n\
+            - [Abs](/etc/passwd.md) — skip absolute path\n\
+            - [Plain](notes.txt) — skip non-md\n";
+        let links = index_links(index);
+        assert_eq!(links.len(), 1);
+        assert_eq!(links[0], ("Cite sources".into(), "feedback_cite_sources.md".into()));
+    }
+
+    #[test]
+    fn resolve_and_load_topic_via_index_and_filename() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            dir.path().join(MEMORY_INDEX),
+            "# Memory Index\n- [Cite sources](feedback_cite_sources.md) — hook\n",
+        )
+        .unwrap();
+        std::fs::write(
+            dir.path().join("feedback_cite_sources.md"),
+            "Always cite sources inline.",
+        )
+        .unwrap();
+        std::env::set_var(get_env_name("memory_dir"), dir.path());
+
+        // Substring of the link target stem resolves.
+        let (path, text) = load_topic("cite_sources").unwrap();
+        assert!(path.ends_with("feedback_cite_sources.md"));
+        assert!(text.contains("cite sources inline"));
+        // Direct filename also resolves; the MEMORY.md index itself never does.
+        assert!(resolve_topic("feedback_cite_sources").is_some());
+        assert!(resolve_topic("MEMORY").is_none());
+        // memory: scheme expansion rewrites to the resolved path.
+        let expanded = expand_memory_refs(vec!["memory:cite_sources".into(), "other.txt".into()]);
+        assert!(expanded[0].ends_with("feedback_cite_sources.md"));
+        assert_eq!(expanded[1], "other.txt");
+
+        std::env::remove_var(get_env_name("memory_dir"));
     }
 
     #[test]
