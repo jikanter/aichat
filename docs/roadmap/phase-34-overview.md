@@ -1,10 +1,10 @@
 # Phase 34: Auto-Memory Wiring : Overview - Epic 14
 
-**Status (2026-05-25):** **Planned — design draft.** No items below are implemented. This phase fills the agent-writer slot at the session level by wiring a freeform `memory/` surface alongside the typed `knowledge/` store. Implements Theme 2 of [`260524_anthropic_memory_divergence.md`](https://github.com/jikanter/aichat-private/) (Posture C "compose"). Pairs with [Phase 35](phase-35-overview.md) (Knowledge-MCP) — together they form Epic 14's dual-writer architecture.
+**Status (2026-05-30):** **34A Done** (read-only surface shipped); **34B–34D Planned.** This phase fills the agent-writer slot at the session level by wiring a freeform `memory/` surface alongside the typed `knowledge/` store. Implements Theme 2 of [`260524_anthropic_memory_divergence.md`](https://github.com/jikanter/aichat-private/) (Posture C "compose"). Pairs with [Phase 35](phase-35-overview.md) (Knowledge-MCP) — together they form Epic 14's dual-writer architecture. User-facing doc: [`docs/features/auto-memory.md`](../features/auto-memory.md); demo: [`docs/demos/phase-34-auto-memory.md`](../demos/phase-34-auto-memory.md).
 
 | Item | Description | Status |
 |---|---|---|
-| 34A | Read `memory/MEMORY.md` at REPL/CLI startup as additional system-prompt context — mirrors Claude Code's first-200-lines auto-load discipline. Read-only. | Planned (design draft) |
+| 34A | Read `memory/MEMORY.md` at REPL/CLI startup as additional system-prompt context — mirrors Claude Code's first-200-lines auto-load discipline. Read-only. | **Done** (2026-05-30) |
 | 34B | Topic-file lazy loading — when a relative markdown link in `MEMORY.md` is referenced by the role/conversation, lazy-load via the existing `Input::from_files_with_spinner` plumbing. | Planned (design draft) |
 | 34C | Session-exit Reflector pass — emit candidate `memory/<topic>.md` files from the conversation transcript, reusing the [`src/knowledge/evolve.rs`](../../src/knowledge/evolve.rs) Reflector role. | Planned (design draft) |
 | 34D | Curator gate — prompt the user before persisting topic files, or auto-accept under `--memory-auto-curate`. Closes the dual-writer loop. | Planned (design draft) |
@@ -43,6 +43,37 @@ At REPL entry and at single-shot CLI launch (`aichat "..."` and `aichat -r role`
 Mirrors Claude Code's behaviour: read the first ~200 lines of `MEMORY.md`, treat as context, do not write. Cap at 200 lines (or 8 KiB, whichever is smaller) to bound token cost; emit a one-line warning to stderr if truncation fires so the user knows they should split the file into topics.
 
 **Files:** [`src/repl/mod.rs`](../../src/repl/mod.rs) (read-on-launch hook before the prompt loop), [`src/config/session.rs`](../../src/config/session.rs) (session-level `memory_preamble: Option<String>` cached so multi-turn conversations don't re-read), [`src/config/mod.rs`](../../src/config/mod.rs) (project-root probe; reuse the `knowledge/` discovery logic at `src/knowledge/cli.rs`).
+
+### 34A — as shipped (2026-05-30)
+
+The implementation diverged from the draft above in two ways, both for a
+single, broader chokepoint:
+
+- **Injection point is `Input::build_messages`** (`src/config/input.rs`), not
+  `repl/mod.rs`. That one function is the universal path every completion flows
+  through — single-shot CLI, the legacy REPL, **and** the server's role path
+  (`chat_completions_via_role`). Injecting there (right after the existing
+  `-o` output-format suffix injection) covers all of them with one call to the
+  new `memory::inject_preamble`. The draft's per-surface hooks would have
+  missed the server path.
+- **The cache lives on `Config`** (`memory_preamble: Option<String>`), read
+  once in `Config::init` via `memory::load_preamble`, rather than on
+  `Session`. The preamble is process-wide standing context, not session state,
+  and roles/prompts without a session still need it.
+- **New module `src/memory/mod.rs`** owns discovery, the cap, and injection
+  (with unit tests for the cap edge cases and the injector). Discovery uses
+  `current_dir()/memory/` for project-local and `Config::config_dir()/memory/`
+  for user-level, with an `AICHAT_MEMORY_DIR` override (`get_env_name`
+  convention) — it does **not** reuse `kb_root()` because that is config-dir-
+  rooted, whereas memory is project-root-first per tenet 5.
+- **Pi's native agent turns** (which bypass aichat roles entirely) are covered
+  by a parallel reader in the bundled pi extension
+  (`pi-extensions/src/index.ts` → `assets/pi-extensions/aichat-bridge.js`),
+  capped to the same budget. This replaces the buggy first-pass reader.
+
+Observability: the preamble surfaces in `aichat --info -o json` under
+`memory_preamble` and in text `--info` as a `memory_preamble  <N> chars` row.
+Tests: `tests/integration/auto-memory.sh` (bats) + `src/memory/mod.rs` units.
 
 ## 34B Design — Topic-file lazy loading
 

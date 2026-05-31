@@ -361,6 +361,13 @@ pub struct Config {
     /// injected.
     #[serde(skip)]
     pub last_knowledge_hits: Vec<crate::knowledge::query::FactHit>,
+
+    /// Phase 34A: cached `memory/MEMORY.md` system-prompt block, read once at
+    /// startup by `crate::memory::load_preamble` and injected into the system
+    /// message by `Input::build_messages`. `None` when no memory file is
+    /// discoverable. Read-only; the write loop (34C/34D) is deferred.
+    #[serde(skip)]
+    pub memory_preamble: Option<String>,
 }
 
 /// State for deferred tool loading (Phase 1C).
@@ -491,6 +498,7 @@ impl Default for Config {
             deferred_tools: None,
             last_knowledge_events: Vec::new(),
             last_knowledge_hits: Vec::new(),
+            memory_preamble: None,
         }
     }
 }
@@ -592,6 +600,23 @@ impl Config {
                 }
             }
             config.mcp_pool = Some(Arc::new(pool));
+        }
+
+        // Phase 34A: read `memory/MEMORY.md` once at startup and cache the
+        // capped system-prompt block. Read-only; injected per-turn by
+        // `Input::build_messages`. Loaded even under `--info` so the preamble
+        // surfaces in `--info -o json`.
+        if let Some(preamble) = crate::memory::load_preamble() {
+            if preamble.truncated {
+                eprintln!(
+                    "warning: {} exceeds the {}-line / {}-KiB memory preamble cap; \
+                     split it into topic files so context is not dropped",
+                    preamble.source.display(),
+                    crate::memory::MAX_PREAMBLE_LINES,
+                    crate::memory::MAX_PREAMBLE_BYTES / 1024,
+                );
+            }
+            config.memory_preamble = Some(preamble.as_system_block());
         }
 
         Ok(config)
@@ -924,6 +949,10 @@ impl Config {
         }
         if role.save_to().is_some() {
             items.push(("save_to", role.save_to().unwrap().to_string()));
+        }
+        // Phase 34A: show the auto-memory preamble size when one is loaded.
+        if let Some(mem) = self.memory_preamble.as_ref() {
+            items.push(("memory_preamble", format!("{} chars", mem.len())));
         }
         items.extend([
             ("compress_threshold", self.compress_threshold.to_string()),

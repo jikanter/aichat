@@ -7,6 +7,7 @@ mod context_budget;
 mod function;
 mod knowledge;
 mod mcp;
+mod memory;
 mod mcp_client;
 mod pipe;
 mod rag;
@@ -517,6 +518,11 @@ async fn run(config: GlobalConfig, mut cli: Cli, text: Option<String>) -> Result
                 info.insert("temperature".into(), serde_json::json!(temp));
             }
             info.insert("stream".into(), serde_json::json!(cfg.stream));
+            // Phase 34A: surface the cached memory/MEMORY.md preamble so the
+            // auto-memory read surface is observable without a model call.
+            if let Some(mem) = cfg.memory_preamble.as_ref() {
+                info.insert("memory_preamble".into(), serde_json::json!(mem));
+            }
             drop(cfg);
             println!(
                 "{}",

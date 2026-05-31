@@ -85,15 +85,63 @@ async function runWithFeedback(
 }
 
 /**
+ * Phase 34A: auto-memory read surface for pi's *native* agent turns.
  *
- * @param pi
- * @returns
+ * aichat's Rust side injects `memory/MEMORY.md` into the system prompt for
+ * role/agent/prompt turns (see `src/memory/mod.rs`), but pi's own agent loop
+ * builds its system prompt independently of any aichat role. This hook fills
+ * that gap: it reads the project-local `memory/MEMORY.md`, caps it to the same
+ * 200-line / 8-KiB budget as the Rust loader, and prepends the capped block to
+ * pi's system prompt. Read-only — no write loop here (34C/34D deferred).
  */
-async function registerMemoryMdInjection(pi, mem) {
-  pi.on("before_agent_start", async (evt, ctx) => {
-    return {
-      systemPrompt: `${mem}` + evt.systemPrompt,
-    };
+const MEMORY_SUBDIR = "memory";
+const MEMORY_INDEX = "MEMORY.md";
+const MAX_PREAMBLE_LINES = 200;
+const MAX_PREAMBLE_BYTES = 8 * 1024;
+const PREAMBLE_HEADER = "# Project memory";
+
+/** Cap raw MEMORY.md content to the line/byte budget, mirroring `cap_preamble`. */
+function capPreamble(raw: string): string {
+  let lines = raw.split("\n");
+  if (lines.length > MAX_PREAMBLE_LINES) {
+    lines = lines.slice(0, MAX_PREAMBLE_LINES);
+  }
+  let joined = lines.join("\n");
+  while (Buffer.byteLength(joined, "utf8") > MAX_PREAMBLE_BYTES && lines.length > 1) {
+    lines.pop();
+    joined = lines.join("\n");
+  }
+  // A lone over-budget line: hard-truncate on a byte budget (Buffer slicing
+  // respects nothing, so re-decode and drop the trailing partial char).
+  if (Buffer.byteLength(joined, "utf8") > MAX_PREAMBLE_BYTES) {
+    joined = Buffer.from(joined, "utf8")
+      .subarray(0, MAX_PREAMBLE_BYTES)
+      .toString("utf8")
+      .replace(/�+$/, "");
+  }
+  return joined;
+}
+
+/**
+ * Register a one-time `before_agent_start` hook that loads, caps, and prepends
+ * the project-local memory block. The block is read once and cached so
+ * multi-turn sessions don't re-read the file.
+ */
+function registerMemoryMdInjection(pi: ExtensionAPI, workingDir: string): void {
+  let cached: string | null | undefined; // undefined = not yet read
+  pi.on("before_agent_start", async (evt: { systemPrompt: string }) => {
+    if (cached === undefined) {
+      try {
+        const memoryPath = path.join(workingDir, MEMORY_SUBDIR, MEMORY_INDEX);
+        const raw = await fs.readFile(memoryPath, "utf8");
+        const capped = capPreamble(raw).trim();
+        cached = capped ? `${PREAMBLE_HEADER}\n${capped}\n\n` : null;
+      } catch {
+        cached = null; // no memory file — become a no-op for the session.
+      }
+    }
+    if (!cached) return;
+    return { systemPrompt: cached + evt.systemPrompt };
   });
 }
 
@@ -108,17 +156,10 @@ export default function aichatBridge(pi: ExtensionAPI): void {
     // Silent no-op. The aichat launcher always sets these.
     return;
   }
-  pi.on("session_start", async (evt: SessionEntryBase, ctx) => {
-    const workingDir = ctx.getSessionManager().getCurrentWorkingDirectory();
-    if (!workingDir) return;
-    let memoryPath = path.join(workingDir, "MEMORY.md");
-
-    if (fs.path.existsSync(memoryPath)) {
-      const memoryPath = path.join(workingDir, "MEMORY.md");
-      const memoryContent = await fs.readFile(memoryPath, "utf8");
-      registerMemoryMdInjection(pi, memoryContent);
-    }
-  });
+  // Phase 34A: prepend project-local `memory/MEMORY.md` to pi's native system
+  // prompt. The hook reads lazily on the first agent turn, so we register it
+  // up front with the launch working directory.
+  registerMemoryMdInjection(pi, process.cwd());
 
   pi.registerCommand("role", {
     description: "Switch the active aichat role (e.g. /role coder)",

@@ -1,46 +1,15 @@
 // src/index.ts
+import path from "node:path";
+import fs from "node:fs/promises";
 var BRIDGE_URL = process.env.AICHAT_BRIDGE_URL;
 var BRIDGE_TOKEN = process.env.AICHAT_BRIDGE_TOKEN;
-
-let cache = {
-  roles: null,
-  rags: null,
-  lastFetch: 0,
-};
-const CACHE_TTL = 60 * 1000; // 1 minute
-
-async function fetchCache() {
-  const now = Date.now();
-  if (cache.roles && cache.rags && (now - cache.lastFetch < CACHE_TTL)) {
-    return;
-  }
-
-  try {
-    const [rolesRes, ragsRes] = await Promise.allSettled([
-      bridgeFetch("/v1/state/roles", { method: "GET" }),
-      bridgeFetch("/v1/state/rags", { method: "GET" }),
-    ]);
-
-    if (rolesRes.status === "fulfilled") {
-      cache.roles = rolesRes.value;
-    }
-    if (ragsRes.status === "fulfilled") {
-      cache.rags = ragsRes.value;
-    }
-    cache.lastFetch = now;
-  } catch (err) {
-    // If fetching fails, we keep the old cache if it exists
-    console.error("Failed to refresh aichat bridge cache:", err);
-  }
-}
-
-async function bridgeFetch(path, init = { method: "GET" }) {
+async function bridgeFetch(path2, init = { method: "GET" }) {
   if (!BRIDGE_URL || !BRIDGE_TOKEN) {
     throw new Error(
       "aichat bridge env not set (AICHAT_BRIDGE_URL/AICHAT_BRIDGE_TOKEN). This extension is intended to be staged by `aichat --pi-repl`."
     );
   }
-  const url = `${BRIDGE_URL}${path}`;
+  const url = `${BRIDGE_URL}${path2}`;
   const headers = {
     Authorization: `Bearer ${BRIDGE_TOKEN}`
   };
@@ -52,7 +21,7 @@ async function bridgeFetch(path, init = { method: "GET" }) {
   const res = await fetch(url, { method: init.method, headers, body });
   const text = await res.text();
   if (!res.ok) {
-    throw new Error(`aichat bridge ${path} \u2192 ${res.status}: ${text}`);
+    throw new Error(`aichat bridge ${path2} \u2192 ${res.status}: ${text}`);
   }
   if (!text) return {};
   try {
@@ -70,22 +39,54 @@ async function runWithFeedback(ctx, op, onOk) {
     ctx.ui.notify(err instanceof Error ? err.message : String(err), "error");
   }
 }
+var MEMORY_SUBDIR = "memory";
+var MEMORY_INDEX = "MEMORY.md";
+var MAX_PREAMBLE_LINES = 200;
+var MAX_PREAMBLE_BYTES = 8 * 1024;
+var PREAMBLE_HEADER = "# Project memory";
+function capPreamble(raw) {
+  let lines = raw.split("\n");
+  if (lines.length > MAX_PREAMBLE_LINES) {
+    lines = lines.slice(0, MAX_PREAMBLE_LINES);
+  }
+  let joined = lines.join("\n");
+  while (Buffer.byteLength(joined, "utf8") > MAX_PREAMBLE_BYTES && lines.length > 1) {
+    lines.pop();
+    joined = lines.join("\n");
+  }
+  if (Buffer.byteLength(joined, "utf8") > MAX_PREAMBLE_BYTES) {
+    joined = Buffer.from(joined, "utf8").subarray(0, MAX_PREAMBLE_BYTES).toString("utf8").replace(/�+$/, "");
+  }
+  return joined;
+}
+function registerMemoryMdInjection(pi, workingDir) {
+  let cached;
+  pi.on("before_agent_start", async (evt) => {
+    if (cached === void 0) {
+      try {
+        const memoryPath = path.join(workingDir, MEMORY_SUBDIR, MEMORY_INDEX);
+        const raw = await fs.readFile(memoryPath, "utf8");
+        const capped = capPreamble(raw).trim();
+        cached = capped ? `${PREAMBLE_HEADER}
+${capped}
+
+` : null;
+      } catch {
+        cached = null;
+      }
+    }
+    if (!cached) return;
+    return { systemPrompt: cached + evt.systemPrompt };
+  });
+}
 function aichatBridge(pi) {
   if (!BRIDGE_URL || !BRIDGE_TOKEN) {
     return;
   }
-  fetchCache();
+  registerMemoryMdInjection(pi, process.cwd());
   pi.registerCommand("role", {
     description: "Switch the active aichat role (e.g. /role coder)",
-    getArgumentCompletions: (prefix) => {
-      if (cache.roles) {
-        const filtered = cache.roles.filter((r) => r.startsWith(prefix));
-        return filtered.length > 0 ? filtered.map((value) => ({ value, label: value })) : null;
-      }
-      return null;
-    },
     handler: async (args, ctx) => {
-      await fetchCache();
       const name = args.trim();
       if (!name) {
         ctx.ui.notify("Usage: /role <name>", "warning");
@@ -111,15 +112,7 @@ function aichatBridge(pi) {
   });
   pi.registerCommand("rag", {
     description: "Start/switch an aichat RAG (use without args for a temp RAG)",
-    getArgumentCompletions: (prefix) => {
-      if (cache.rags) {
-        const filtered = cache.rags.filter((r) => r.startsWith(prefix));
-        return filtered.length > 0 ? filtered.map((value) => ({ value, label: value })) : null;
-      }
-      return null;
-    },
     handler: async (args, ctx) => {
-      await fetchCache();
       const name = args.trim() || void 0;
       await runWithFeedback(
         ctx,
@@ -139,7 +132,10 @@ function aichatBridge(pi) {
       const [name, session] = parts;
       await runWithFeedback(
         ctx,
-        () => bridgeFetch("/v1/state/agent", { method: "POST", body: { name, session } }),
+        () => bridgeFetch("/v1/state/agent", {
+          method: "POST",
+          body: { name, session }
+        }),
         () => `Bound agent: ${name}${session ? ` (session: ${session})` : ""}`
       );
     }
@@ -156,7 +152,10 @@ function aichatBridge(pi) {
       const text = rest.length ? rest.join(" ") : void 0;
       await runWithFeedback(
         ctx,
-        () => bridgeFetch("/v1/state/macro", { method: "POST", body: { name, text } }),
+        () => bridgeFetch("/v1/state/macro", {
+          method: "POST",
+          body: { name, text }
+        }),
         (result) => {
           if (typeof result.output === "string" && result.output.length > 0) {
             return result.output;
@@ -198,7 +197,10 @@ function aichatBridge(pi) {
       }
       await runWithFeedback(
         ctx,
-        () => bridgeFetch("/v1/state/exit-context", { method: "POST", body: { kind } }),
+        () => bridgeFetch("/v1/state/exit-context", {
+          method: "POST",
+          body: { kind }
+        }),
         () => `Exited ${kind}`
       );
     }

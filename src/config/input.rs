@@ -428,6 +428,14 @@ impl Input {
                 }
             }
         }
+        // Phase 34A: inject the cached `memory/MEMORY.md` block into the
+        // system message, after the role's prompt body and any output-format
+        // suffix. Read-only standing context; absent when no memory file
+        // exists. Built fresh each turn, so it never double-appends.
+        let memory_preamble = self.config.read().memory_preamble.clone();
+        if let Some(block) = memory_preamble {
+            crate::memory::inject_preamble(&mut messages, &block);
+        }
         if let Some(tool_calls) = &self.tool_calls {
             messages.push(Message::new(
                 MessageRole::Assistant,
